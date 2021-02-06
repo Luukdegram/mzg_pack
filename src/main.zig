@@ -81,7 +81,12 @@ pub fn MsgPack(comptime T: type) type {
         pub fn serialize(value: T, writer: anytype) (@TypeOf(writer).Error || SerializeError)!void {
             try writeType(T, value, writer);
         }
-        pub fn deserialize(reader: anytype) @TypeOf(reader).Error!T {}
+        pub fn deserialize(reader: anytype) @TypeOf(reader).Error!T {
+            const byte = try reader.readByte();
+            switch (byte) {
+                Format.fixint_base...Format.fixint_max => {},
+            }
+        }
 
         fn writeType(comptime S: type, value: S, writer: anytype) (@TypeOf(writer).Error || SerializeError)!void {
             switch (S) {
