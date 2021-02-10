@@ -1,6 +1,9 @@
 const std = @import("std");
+const meta = std.meta;
+const trait = meta.trait;
 const testing = std.testing;
 const max = std.math.maxInt;
+const assert = std.debug.assert;
 
 /// Supported types to be serialized
 const Format = enum(u8) {
@@ -74,18 +77,89 @@ fn negint(value: i5) u8 {
     return @intCast(u8, value) + @enumToInt(Format.negfixint_base);
 }
 
+fn fromByte(byte: u8) Format {
+    return @intToEnum(Format, byte);
+}
+
 pub const SerializeError = error{SliceTooLong};
+pub const DeserializeError = error{MismatchingFormatType};
+
+/// Creates a generic Deserializater over the given ReaderType.
+/// Allows for deserializing msgpack data streams into given types.
+///
+/// It is possible to define your custom deserialization function for a given type
+/// by defining a `deserialize(*Self, anytype)` function
+pub fn Deserializer(comptime ReaderType: type) type {
+    return struct {
+        reader: ReaderType,
+
+        const Self = @This();
+
+        pub const Error = error{MismatchingFormatType} || ReaderType.Error;
+
+        /// Initializes a new instance wrapper around the given `reader`
+        pub fn init(reader: ReaderType) Self {
+            return Self{ .reader = reader };
+        }
+
+        /// Deserializes the msgpack stream into a value of type `T`
+        pub fn deserialize(self: *Self, comptime T: type, buffer: []u8) !T {
+            var value: T = undefined;
+            try self.deserializeInto(buffer, &value);
+            return value;
+        }
+
+        /// Deserializes the msgpack data stream into the given pointer.
+        /// asserts `ptr` is a pointer
+        pub fn deserializeInto(self: *Self, buffer: []u8, ptr: anytype) !void {
+            const T = @TypeOf(ptr);
+            comptime assert(trait.is(.Pointer)(T));
+
+            const C = comptime meta.Child(T);
+
+            if (comptime trait.hasFn("deserialize")(C)) return C.deserialize(ptr, self);
+
+            switch (C) {
+                []const u8 => ptr.* = try self.deserializeString(buffer),
+                []u8 => ptr.* = try self.deserializeBin(buffer),
+                else => switch (@typeInfo(C)) {
+                    .Struct => try self.deserializeMap(),
+                },
+            }
+        }
+
+        /// Deserializes a msgpack string into a string
+        /// asserts the first byte is correct
+        fn deserializeString(self: *Self, buffer: []u8) ![]const u8 {
+            const string_byte = try self.reader.readByte();
+
+            const len: u32 = switch (string_byte) {
+                format(.fixstr_base)...format(.fixstr_max) => string_byte - format(.fixstr_base),
+                format(.str_8) => try self.reader.readByte(),
+                format(.str_16) => try self.reader.readIntBig(u16),
+                format(.str_32) => try self.reader.readIntBig(u32),
+                else => return error.MismatchingFormatType,
+            };
+            if (len > buffer.len) return error.BufferTooSmall;
+
+            const read = try self.reader.readAll(buffer[0..len]);
+            std.debug.assert(len == read);
+            return buffer[0..len];
+        }
+    };
+}
+
+/// returns a new `Deserializer` for the type of the given `reader`
+pub fn deserializer(reader: anytype) Deserializer(@TypeOf(reader)) {
+    return Deserializer(@TypeOf(reader)).init(reader);
+}
 
 pub fn MsgPack(comptime T: type) type {
     return struct {
+        const Self = @This();
+
         pub fn serialize(value: T, writer: anytype) (@TypeOf(writer).Error || SerializeError)!void {
             try writeType(T, value, writer);
-        }
-        pub fn deserialize(reader: anytype) @TypeOf(reader).Error!T {
-            const byte = try reader.readByte();
-            switch (byte) {
-                Format.fixint_base...Format.fixint_max => {},
-            }
         }
 
         fn writeType(comptime S: type, value: S, writer: anytype) (@TypeOf(writer).Error || SerializeError)!void {
@@ -300,5 +374,34 @@ test "Serialization" {
 
         try msg_pack.serialize(case.value, stream.writer());
         testing.expectEqualSlices(u8, case.expected, stream.getWritten());
+    }
+}
+
+test "Deserialization" {
+    const test_cases = .{
+        .{
+            .type = []const u8,
+            .value = "Hello world!",
+        },
+    };
+
+    inline for (test_cases) |case, i| {
+        var buffer: [4096]u8 = undefined;
+        var out = std.io.fixedBufferStream(&buffer);
+        const msg_pack = MsgPack(case.type);
+
+        try msg_pack.serialize(case.value, out.writer());
+
+        var in = std.io.fixedBufferStream(&buffer);
+        var _deserializer = deserializer(in.reader());
+
+        var backup_buffer: [4096]u8 = undefined;
+        const result = try _deserializer.deserialize(case.type, &backup_buffer);
+
+        switch (case.type) {
+            []const u8 => testing.expectEqualStrings(case.value, result),
+            []u8 => testing.expectEqualSlices(u8, case.value, result),
+            else => testing.expectEqual(case.value, result),
+        }
     }
 }
