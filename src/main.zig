@@ -123,14 +123,17 @@ pub fn Deserializer(comptime ReaderType: type) type {
                 []const u8 => ptr.* = try self.deserializeString(buffer),
                 []u8 => ptr.* = try self.deserializeBin(buffer),
                 else => switch (@typeInfo(C)) {
-                    .Struct => try self.deserializeMap(),
+                    .Struct => try self.deserializeMap(buffer),
+                    .Optional => |opt| ptr.* = try self.deserializeOptional(opt.child, buffer),
+                    .Bool => ptr.* = try self.deserializeBool(),
+                    .Int => ptr.* = try self.deserializeInt(C),
+                    else => @compileError("Unsupported deserialization type " ++ @typeName(C) ++ "\n"),
                 },
             }
         }
 
         /// Deserializes a msgpack string into a string
-        /// asserts the first byte is correct
-        fn deserializeString(self: *Self, buffer: []u8) ![]const u8 {
+        pub fn deserializeString(self: *Self, buffer: []u8) ![]const u8 {
             const string_byte = try self.reader.readByte();
 
             const len: u32 = switch (string_byte) {
@@ -145,6 +148,97 @@ pub fn Deserializer(comptime ReaderType: type) type {
             const read = try self.reader.readAll(buffer[0..len]);
             std.debug.assert(len == read);
             return buffer[0..len];
+        }
+
+        /// Deserializes a msgpack binary data format serialized stream into a slice of bytes
+        pub fn deserializeBin(self: *Self, buffer: []u8) ![]u8 {
+            const byte = try self.reader.readByte();
+
+            const len: u32 = switch (byte) {
+                format(.bin_8) => try self.reader.readByte(),
+                format(.bin_16) => try self.reader.readIntBig(u16),
+                format(.bin_32) => try self.reader.readIntBig(u32),
+                else => return error.MismatchingFormatType,
+            };
+            if (len > buffer.len) return error.BufferTooSmall;
+
+            const read = try self.reader.readAll(buffer[0..len]);
+            std.debug.assert(len == read);
+            return buffer[0..len];
+        }
+
+        pub fn deserializeOptional(self: *Self, comptime T: type, buffer: []u8) !?T {
+            @panic("TODO: Implement deserializeOptional\n");
+        }
+
+        /// Deserializes the msgpack data into a boolean.
+        pub fn deserializeBool(self: *Self) !bool {
+            return switch (try self.reader.readByte()) {
+                format(.@"true") => true,
+                format(.@"false") => false,
+                else => return error.MismatchingFormatType,
+            };
+        }
+
+        /// Deserializes the data stream into an integer of type `T`.
+        /// Returns `error.MismatchingFormatType` when the stream contains a different
+        /// data type than `T`.
+        pub fn deserializeInt(self: *Self, comptime T: type) !T {
+            const byte = try self.reader.readByte();
+            const bits = meta.bitCount(T);
+
+            // TODO: Can we write this more efficiently? please...
+            switch (byte) {
+                format(.fixint_base)...format(.fixint_max) => {
+                    if (trait.isSignedInt(T)) return error.MismatchingFormatType;
+                    return if (bits > 7) @intCast(T, byte) else @truncate(T, byte);
+                },
+                format(.negfixint_base)...format(.negfixint_max) => {
+                    if (trait.isUnsignedInt(T)) return error.MismatchingFormatType;
+                    return if (bits > 5) @intCast(T, byte) else @truncate(T, byte);
+                },
+                format(.uint_8) => {
+                    if (trait.isSignedInt(T)) return error.MismatchingFormatType;
+                    const result = try self.reader.readByte();
+                    return if (bits > 8) @intCast(T, result) else @truncate(T, result);
+                },
+                format(.uint_16) => {
+                    if (trait.isSignedInt(T)) return error.MismatchingFormatType;
+                    const result = try self.reader.readIntBig(u16);
+                    return if (bits > 16) @intCast(T, result) else @truncate(T, result);
+                },
+                format(.uint_32) => {
+                    if (trait.isSignedInt(T)) return error.MismatchingFormatType;
+                    const result = try self.reader.readIntBig(u32);
+                    return if (bits > 32) @intCast(T, result) else @truncate(T, result);
+                },
+                format(.uint_64) => {
+                    if (trait.isSignedInt(T)) return error.MismatchingFormatType;
+                    const result = try self.reader.readIntBig(u64);
+                    return if (bits > 64) @intCast(T, result) else @truncate(T, result);
+                },
+                format(.int_8) => {
+                    if (trait.isUnsignedInt(T)) return error.MismatchingFormatType;
+                    const result = try self.reader.readIntBig(i8);
+                    return if (bits > 8) @intCast(T, result) else @truncate(T, result);
+                },
+                format(.int_16) => {
+                    if (trait.isUnsignedInt(T)) return error.MismatchingFormatType;
+                    const result = try self.reader.readIntBig(i16);
+                    return if (bits > 16) @intCast(T, result) else @truncate(T, result);
+                },
+                format(.int_32) => {
+                    if (trait.isUnsignedInt(T)) return error.MismatchingFormatType;
+                    const result = try self.reader.readIntBig(i32);
+                    return if (bits > 16) @intCast(T, result) else @truncate(T, result);
+                },
+                format(.int_64) => {
+                    if (trait.isUnsignedInt(T)) return error.MismatchingFormatType;
+                    const result = try self.reader.readIntBig(i64);
+                    return if (bits > 16) @intCast(T, result) else @truncate(T, result);
+                },
+                else => return error.MismatchingFormatType,
+            }
         }
     };
 }
@@ -382,6 +476,10 @@ test "Deserialization" {
         .{
             .type = []const u8,
             .value = "Hello world!",
+        },
+        .{
+            .type = u32,
+            .value = @as(u32, 21049),
         },
     };
 
