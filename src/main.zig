@@ -133,8 +133,20 @@ pub fn Deserializer(comptime ReaderType: type, comptime size: usize) type {
                     .Bool => try self.deserializeBool(),
                     .Int => try self.deserializeInt(C),
                     .Float => try self.deserializeFloat(),
+                    .Array => try self.deserializeArray(C),
+                    .Pointer => try self.deserializePointer(C),
                     else => @compileError("Unsupported deserialization type " ++ @typeName(C) ++ "\n"),
                 },
+            };
+        }
+
+        /// Deserializes a pointer to one or multiple items
+        pub fn deserializePointer(self: *Self, comptime T: type) !T {
+            return switch (@typeInfo(T).Pointer.size) {
+                .One => try self.deserialize(T),
+                .Slice => try self.deserializeArray(T),
+                .Many => try self.deserializeArray(T),
+                .C => @compileError("Unsupported pointer type C"),
             };
         }
 
@@ -168,7 +180,7 @@ pub fn Deserializer(comptime ReaderType: type, comptime size: usize) type {
         }
 
         /// Deserializes a msgpack array into the given type `T`.
-        pub fn deserializeArray(self: *Self, comptime T: type, value: *T) !T {
+        pub fn deserializeArray(self: *Self, comptime T: type) !T {
             const info = @typeInfo(T);
             if (comptime !trait.isSlice(T)) @compileError("Expected given type to be an array, but instead got '" ++ @typeName(T) ++ "'");
 
@@ -180,12 +192,13 @@ pub fn Deserializer(comptime ReaderType: type, comptime size: usize) type {
                 else => return error.MismatchingFormatType,
             };
 
-            var i: usize = 0;
-            var buffer_index: usize = 0;
-            while (i < len) : (i += 1) {
-                var v: meta.Child(T) = undefined;
-                buffer_index += try self.deserializeInto(buffer[buffer_index..], &v);
+            var t_buf: [1024]meta.Child(T) = undefined;
+            for (t_buf) |*v, i| {
+                try self.deserializeInto(v);
+                if (i == len - 1) break;
             }
+
+            return t_buf[0..len];
         }
 
         /// Deserializes a msgpack string into a string
@@ -563,6 +576,10 @@ test "Deserialization" {
             .type = struct { compact: bool, schema: u7 },
             .value = .{ .compact = true, .schema = 5 },
         },
+        .{
+            .type = []const []const u8,
+            .value = &[_][]const u8{ "one", "two", "three" },
+        },
     };
 
     inline for (test_cases) |case, i| {
@@ -580,7 +597,15 @@ test "Deserialization" {
         switch (case.type) {
             []const u8 => testing.expectEqualStrings(case.value, result),
             []u8 => testing.expectEqualSlices(u8, case.value, result),
-            else => testing.expectEqual(@as(case.type, case.value), result),
+            else => switch (@typeInfo(case.type)) {
+                .Pointer => |info| switch (info.size) {
+                    .Slice => for (case.value) |val, j| {
+                        testing.expectEqualSlices(meta.Child(info.child), val, result[j]);
+                    },
+                    else => @panic("TODO: Testing for Pointer types"),
+                },
+                else => testing.expectEqual(@as(case.type, case.value), result),
+            },
         }
     }
 }
