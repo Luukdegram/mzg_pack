@@ -103,15 +103,17 @@ pub fn Deserializer(comptime ReaderType: type) type {
         }
 
         /// Deserializes the msgpack stream into a value of type `T`
+        /// use `deserializeInto` if the length written to `buffer` is required
         pub fn deserialize(self: *Self, comptime T: type, buffer: []u8) !T {
             var value: T = undefined;
-            try self.deserializeInto(buffer, &value);
+            _ = try self.deserializeInto(buffer, &value);
             return value;
         }
 
         /// Deserializes the msgpack data stream into the given pointer.
         /// asserts `ptr` is a pointer
-        pub fn deserializeInto(self: *Self, buffer: []u8, ptr: anytype) !void {
+        /// Returns the length written to `buffer`
+        pub fn deserializeInto(self: *Self, buffer: []u8, ptr: anytype) !usize {
             const T = @TypeOf(ptr);
             comptime assert(trait.is(.Pointer)(T));
 
@@ -119,17 +121,64 @@ pub fn Deserializer(comptime ReaderType: type) type {
 
             if (comptime trait.hasFn("deserialize")(C)) return C.deserialize(ptr, self);
 
-            switch (C) {
-                []const u8 => ptr.* = try self.deserializeString(buffer),
-                []u8 => ptr.* = try self.deserializeBin(buffer),
+            return switch (C) {
+                []const u8 => blk: {
+                    ptr.* = try self.deserializeString(buffer);
+                    break :blk ptr.len;
+                },
+                []u8 => blk: {
+                    ptr.* = try self.deserializeBin(buffer);
+                    break :blk ptr.len;
+                },
                 else => switch (@typeInfo(C)) {
-                    .Struct => try self.deserializeMap(buffer),
-                    .Optional => |opt| ptr.* = try self.deserializeOptional(opt.child, buffer),
-                    .Bool => ptr.* = try self.deserializeBool(),
-                    .Int => ptr.* = try self.deserializeInt(C),
+                    .Struct => try self.deserializeStruct(C, ptr, buffer),
+                    // .Optional => |opt| ptr.* = self.deserializeInto(opt.child, ptr, buffer) catch null,
+                    .Bool => blk: {
+                        ptr.* = try self.deserializeBool();
+                        break :blk 0;
+                    },
+                    .Int => blk: {
+                        ptr.* = try self.deserializeInt(C);
+                        break :blk 0;
+                    },
+                    .Float => blk: {
+                        ptr.* = try self.deserializeFloat();
+                        break :blk 0;
+                    },
                     else => @compileError("Unsupported deserialization type " ++ @typeName(C) ++ "\n"),
                 },
+            };
+        }
+
+        /// Deserializes a msgpack map into the given struct of type `T`
+        pub fn deserializeStruct(self: *Self, comptime T: type, value: *T, buffer: []u8) !usize {
+            const info = @typeInfo(T);
+            if (info != .Struct) @compileError("Given type '" ++ @typeName(T) ++ "' is not a struct");
+            const struct_info = info.Struct;
+
+            const byte = try self.reader.readByte();
+            const len: u32 = switch (byte) {
+                format(.fixmap_base)...format(.fixmap_max) => byte - format(.fixmap_base),
+                format(.map_16) => try self.reader.readIntBig(u16),
+                format(.map_32) => try self.reader.readIntBig(u32),
+                else => return error.MismatchingFormatType,
+            };
+
+            var i: usize = 0;
+            var buffer_index: usize = 0;
+            loop: while (i < len) : (i += 1) {
+                const key = try self.deserializeString(buffer[buffer_index..]);
+                buffer_index += key.len;
+
+                inline for (meta.fields(T)) |struct_field| {
+                    if (std.mem.eql(u8, struct_field.name, key)) {
+                        buffer_index += try self.deserializeInto(buffer[buffer_index..], &@field(value, struct_field.name));
+                        continue :loop;
+                    }
+                }
+                return error.MismatchingFormatType;
             }
+            return buffer_index;
         }
 
         /// Deserializes a msgpack string into a string
@@ -167,10 +216,6 @@ pub fn Deserializer(comptime ReaderType: type) type {
             return buffer[0..len];
         }
 
-        pub fn deserializeOptional(self: *Self, comptime T: type, buffer: []u8) !?T {
-            @panic("TODO: Implement deserializeOptional\n");
-        }
-
         /// Deserializes the msgpack data into a boolean.
         pub fn deserializeBool(self: *Self) !bool {
             return switch (try self.reader.readByte()) {
@@ -184,58 +229,84 @@ pub fn Deserializer(comptime ReaderType: type) type {
         /// Returns `error.MismatchingFormatType` when the stream contains a different
         /// data type than `T`.
         pub fn deserializeInt(self: *Self, comptime T: type) !T {
+            if (@typeInfo(T) != .Int) @compileError("Expected integer type, but found type '" ++ @typeName(T) ++ "'");
+
+            return if (comptime trait.isSignedInt(T))
+                self.deserializeSignedInt(T)
+            else
+                self.deserializeUnsignedInt(T);
+        }
+
+        /// Deserializes the data into an unsigned integer of type `T`
+        pub fn deserializeUnsignedInt(self: *Self, comptime T: type) !T {
+            if (comptime !trait.isUnsignedInt(T)) @compileError("Given type '" ++ @typeName(T) ++ "' is not an unsigned integer");
+
             const byte = try self.reader.readByte();
             const bits = meta.bitCount(T);
 
-            // TODO: Can we write this more efficiently? please...
             switch (byte) {
-                format(.fixint_base)...format(.fixint_max) => {
-                    if (trait.isSignedInt(T)) return error.MismatchingFormatType;
-                    return if (bits > 7) @intCast(T, byte) else @truncate(T, byte);
-                },
-                format(.negfixint_base)...format(.negfixint_max) => {
-                    if (trait.isUnsignedInt(T)) return error.MismatchingFormatType;
-                    return if (bits > 5) @intCast(T, byte) else @truncate(T, byte);
-                },
+                format(.fixint_base)...format(.fixint_max) => return if (bits > 7) @intCast(T, byte) else @truncate(T, byte),
                 format(.uint_8) => {
-                    if (trait.isSignedInt(T)) return error.MismatchingFormatType;
                     const result = try self.reader.readByte();
                     return if (bits > 8) @intCast(T, result) else @truncate(T, result);
                 },
                 format(.uint_16) => {
-                    if (trait.isSignedInt(T)) return error.MismatchingFormatType;
                     const result = try self.reader.readIntBig(u16);
                     return if (bits > 16) @intCast(T, result) else @truncate(T, result);
                 },
                 format(.uint_32) => {
-                    if (trait.isSignedInt(T)) return error.MismatchingFormatType;
                     const result = try self.reader.readIntBig(u32);
                     return if (bits > 32) @intCast(T, result) else @truncate(T, result);
                 },
                 format(.uint_64) => {
-                    if (trait.isSignedInt(T)) return error.MismatchingFormatType;
                     const result = try self.reader.readIntBig(u64);
                     return if (bits > 64) @intCast(T, result) else @truncate(T, result);
                 },
+                else => return error.MismatchingFormatType,
+            }
+        }
+
+        /// Deserializes the data into a signed integer of type `T`
+        pub fn deserializeSignedInt(self: *Self, comptime T: type) !T {
+            if (comptime !trait.isSignedInt(T)) @compileError("Given type '" ++ @typeName(T) ++ "' is not a signed integer");
+
+            const byte = try self.reader.readByte();
+            const bits = meta.bitCount(T);
+
+            switch (byte) {
+                format(.negfixint_base)...format(.negfixint_max) => return if (bits > 5) @intCast(T, byte) else @truncate(T, byte),
                 format(.int_8) => {
-                    if (trait.isUnsignedInt(T)) return error.MismatchingFormatType;
                     const result = try self.reader.readIntBig(i8);
                     return if (bits > 8) @intCast(T, result) else @truncate(T, result);
                 },
                 format(.int_16) => {
-                    if (trait.isUnsignedInt(T)) return error.MismatchingFormatType;
                     const result = try self.reader.readIntBig(i16);
                     return if (bits > 16) @intCast(T, result) else @truncate(T, result);
                 },
                 format(.int_32) => {
-                    if (trait.isUnsignedInt(T)) return error.MismatchingFormatType;
                     const result = try self.reader.readIntBig(i32);
-                    return if (bits > 16) @intCast(T, result) else @truncate(T, result);
+                    return if (bits > 32) @intCast(T, result) else @truncate(T, result);
                 },
                 format(.int_64) => {
-                    if (trait.isUnsignedInt(T)) return error.MismatchingFormatType;
                     const result = try self.reader.readIntBig(i64);
-                    return if (bits > 16) @intCast(T, result) else @truncate(T, result);
+                    return if (bits > 64) @intCast(T, result) else @truncate(T, result);
+                },
+                else => return error.MismatchingFormatType,
+            }
+        }
+
+        /// Desiserializes the serialized data into `T` which must be of type `f32` or `f64`
+        pub fn deserializeFloat(self: *Self, comptime T: type) !T {
+            const float = try self.reader.readByte();
+
+            switch (float) {
+                format(.float_32) => {
+                    if (T != f32) return error.MismatchingFormatType;
+                    return @intToFloat(T, self.reader.readIntBig(u32));
+                },
+                format(.float_64) => {
+                    if (T != f64) return error.MismatchingFormatType;
+                    return @intToFloat(T, self.reader.readIntBig(u64));
                 },
                 else => return error.MismatchingFormatType,
             }
@@ -481,6 +552,10 @@ test "Deserialization" {
             .type = u32,
             .value = @as(u32, 21049),
         },
+        .{
+            .type = struct { compact: bool, schema: u7 },
+            .value = .{ .compact = true, .schema = 5 },
+        },
     };
 
     inline for (test_cases) |case, i| {
@@ -499,7 +574,7 @@ test "Deserialization" {
         switch (case.type) {
             []const u8 => testing.expectEqualStrings(case.value, result),
             []u8 => testing.expectEqualSlices(u8, case.value, result),
-            else => testing.expectEqual(case.value, result),
+            else => testing.expectEqual(@as(case.type, case.value), result),
         }
     }
 }
