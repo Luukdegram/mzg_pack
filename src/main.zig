@@ -135,6 +135,7 @@ pub fn Deserializer(comptime ReaderType: type, comptime size: usize) type {
                     .Float => try self.deserializeFloat(),
                     .Array => try self.deserializeArray(C),
                     .Pointer => try self.deserializePointer(C),
+                    .Null => try self.deserializeNull(),
                     else => @compileError("Unsupported deserialization type " ++ @typeName(C) ++ "\n"),
                 },
             };
@@ -148,6 +149,14 @@ pub fn Deserializer(comptime ReaderType: type, comptime size: usize) type {
                 .Many => try self.deserializeArray(T),
                 .C => @compileError("Unsupported pointer type C"),
             };
+        }
+
+        /// Deserializes the data stream to `null`. Returns an error
+        /// if the data does not correspond to the right format
+        pub fn deserializeNull(self: *Self) !null {
+            const byte = try self.reader.readByte();
+            if (byte != format(.nil)) return error.MismatchingFormatType;
+            return null;
         }
 
         /// Deserializes a msgpack map into the given struct of type `T`
@@ -182,7 +191,8 @@ pub fn Deserializer(comptime ReaderType: type, comptime size: usize) type {
         /// Deserializes a msgpack array into the given type `T`.
         pub fn deserializeArray(self: *Self, comptime T: type) !T {
             const info = @typeInfo(T);
-            if (comptime !trait.isSlice(T)) @compileError("Expected given type to be an array, but instead got '" ++ @typeName(T) ++ "'");
+            if (comptime !trait.isSlice(T) and comptime info != .Array)
+                @compileError("Expected given type to be an array or slice, but instead got '" ++ @typeName(T) ++ "'");
 
             const byte = try self.reader.readByte();
             const len: u32 = switch (byte) {
@@ -192,13 +202,19 @@ pub fn Deserializer(comptime ReaderType: type, comptime size: usize) type {
                 else => return error.MismatchingFormatType,
             };
 
-            var t_buf: [1024]meta.Child(T) = undefined;
-            for (t_buf) |*v, i| {
-                try self.deserializeInto(v);
-                if (i == len - 1) break;
+            if (comptime trait.isSlice(T)) {
+                var t_buf: [1024]meta.Child(T) = undefined;
+                for (t_buf) |*v, i| {
+                    try self.deserializeInto(v);
+                    if (i == len - 1) break;
+                }
+                return t_buf[0..len];
+            } else {
+                const array_len = info.Array.len;
+                var t_buf: [array_len]info.Array.child = undefined;
+                for (t_buf) |*v| try self.deserializeInto(v);
+                return t_buf;
             }
-
-            return t_buf[0..len];
         }
 
         /// Deserializes a msgpack string into a string
@@ -339,106 +355,125 @@ pub fn deserializer(reader: anytype, comptime size: usize) Deserializer(@TypeOf(
     return Deserializer(@TypeOf(reader), size).init(reader);
 }
 
-pub fn MsgPack(comptime T: type) type {
+/// Generic function that wraps around the given `WriterType`.
+/// Serializes given values into msgpack format
+///
+/// Custom serialization functions can be provided by declaring
+/// `serialize(*Self, anytype)!void` function
+pub fn Serializer(comptime WriterType: type) type {
     return struct {
         const Self = @This();
 
-        pub fn serialize(value: T, writer: anytype) (@TypeOf(writer).Error || SerializeError)!void {
-            try writeType(T, value, writer);
+        writer: WriterType,
+
+        pub const WriteError = SerializeError || WriterType.Error;
+
+        /// Initializes a new instance of `Serializer(WriterType)`
+        pub fn init(writer: WriterType) Self {
+            return .{ .writer = writer };
         }
 
-        fn writeType(comptime S: type, value: S, writer: anytype) (@TypeOf(writer).Error || SerializeError)!void {
+        /// Serializes the given value into msgpack format and writes it `WriterType`
+        pub fn serialize(self: *Self, value: anytype) WriteError!void {
+            try self.serializeTyped(@TypeOf(value), value);
+        }
+
+        /// Serializes the given type `S` into msgpack format and writes it to the writer
+        /// of type `WriterType`
+        fn serializeTyped(self: *Self, comptime S: type, value: S) WriteError!void {
             switch (S) {
-                []const u8 => try writeString(value, writer),
-                []u8 => try writeBin(value, writer),
+                []const u8 => try self.serializeString(value),
+                []u8 => try self.serializeBin(value),
                 else => switch (@typeInfo(S)) {
-                    .Int => try writeInt(S, value, writer),
-                    .Bool => try writeBool(value, writer),
-                    .Float => try writeFloat(S, value, writer),
-                    .Null => try writer.writeByte(format(.nil)),
-                    .Struct => try writeMap(S, value, writer),
-                    .Array => try writeArray(S, value, writer),
-                    .Pointer => try writePointer(S, value, writer),
-                    .Optional => |opt| try writeOptional(opt.child, value, writer),
+                    .Int => try self.serializeInt(S, value),
+                    .Bool => try self.serializeBool(value),
+                    .Float => try self.serializeFloat(S, value),
+                    .Null => try self.writer.writeByte(format(.nil)),
+                    .Struct => try self.serializeStruct(S, value),
+                    .Array => |array| try self.serializeArray(S, value),
+                    .Pointer => try self.serializePointer(S, value),
+                    .Optional => |opt| try self.serializeOptional(opt.child, value),
                     else => @compileError("Unsupported type '" ++ @typeName(S) ++ "'"),
                 },
             }
         }
 
         /// Serializes a string or byte array and writes it to the given `writer`
-        fn writeString(value: []const u8, writer: anytype) (@TypeOf(writer).Error || SerializeError)!void {
+        fn serializeString(self: *Self, value: []const u8) WriteError!void {
             const len = value.len;
             if (len == 0) return;
             if (len > max(u32)) return error.SliceTooLong;
             switch (len) {
-                0...max(u5) => try writer.writeByte(fixstr(@intCast(u5, len))),
+                0...max(u5) => try self.writer.writeByte(fixstr(@intCast(u5, len))),
                 max(u5) + 1...max(u8) => {
-                    try writer.writeByte(format(.str_8));
-                    try writer.writeByte(@intCast(u8, len));
+                    try self.writer.writeByte(format(.str_8));
+                    try self.writer.writeByte(@intCast(u8, len));
                 },
                 max(u8) + 1...max(u16) => {
-                    try writer.writeByte(format(.str_16));
-                    try writer.writeIntBig(u16, @intCast(u16, len));
+                    try self.writer.writeByte(format(.str_16));
+                    try self.writer.writeIntBig(u16, @intCast(u16, len));
                 },
                 max(u16) + 1...max(u32) => {
-                    try writer.writeByte(format(.str_32));
-                    try writer.writeIntBig(u32, @intCast(u32, len));
+                    try self.writer.writeByte(format(.str_32));
+                    try self.writer.writeIntBig(u32, @intCast(u32, len));
                 },
                 else => unreachable,
             }
-            try writer.writeAll(value);
+            try self.writer.writeAll(value);
         }
 
         /// Serializes an integer and writes it to the given `writer`
-        fn writeInt(comptime S: type, value: S, writer: anytype) @TypeOf(writer).Error!void {
+        fn serializeInt(self: *Self, comptime S: type, value: S) WriteError!void {
             const info = @typeInfo(S);
             const int = info.Int;
             const sign = int.signedness;
 
-            if (sign == .unsigned and int.bits <= 7) return writer.writeByte(value);
-            if (sign == .signed and int.bits <= 5) return writer.writeByte(negint(value));
+            if (sign == .unsigned and int.bits <= 7) return self.writer.writeByte(value);
+            if (sign == .signed and int.bits <= 5) return self.writer.writeByte(negint(value));
 
             switch (int.bits) {
                 0...8 => {
-                    try writer.writeByte(if (sign == .unsigned) format(.uint_8) else format(int_8));
-                    try writer.writeByte(@intCast(u8, value));
+                    try self.writer.writeByte(if (sign == .unsigned) format(.uint_8) else format(int_8));
+                    try self.writer.writeByte(@intCast(u8, value));
                 },
                 9...16 => {
-                    try writer.writeByte(if (sign == .unsigned) format(.uint_16) else format(int_16));
-                    try writer.writeIntBig(u16, @intCast(u16, value));
+                    try self.writer.writeByte(if (sign == .unsigned) format(.uint_16) else format(int_16));
+                    try self.writer.writeIntBig(u16, @intCast(u16, value));
                 },
                 17...32 => {
-                    try writer.writeByte(if (sign == .unsigned) format(.uint_32) else format(int_32));
-                    try writer.writeIntBig(u32, @intCast(u32, value));
+                    try self.writer.writeByte(if (sign == .unsigned) format(.uint_32) else format(int_32));
+                    try self.writer.writeIntBig(u32, @intCast(u32, value));
                 },
                 33...64 => {
-                    try writer.writeByte(if (sign == .unsigned) format(.uint_64) else format(int_64));
-                    try writer.writeIntBig(u64, @intCast(u64, value));
+                    try self.writer.writeByte(if (sign == .unsigned) format(.uint_64) else format(int_64));
+                    try self.writer.writeIntBig(u64, @intCast(u64, value));
                 },
             }
         }
 
         /// Serializes and writes the booleans value to the `writer`
-        fn writeBool(value: bool, writer: anytype) @TypeOf(writer).Error!void {
-            try writer.writeByte(if (value) format(.@"true") else format(.@"false"));
+        fn serializeBool(self: *Self, value: bool) WriteError!void {
+            try self.writer.writeByte(if (value) format(.@"true") else format(.@"false"));
         }
 
         /// Serializes a 32 -or 64bit float and writes it to the `writer`
         /// TODO ensure big-endian byte order
-        fn writeFloat(comptime S: type, value: S, writer: anytype) @TypeOf(writer).Error!void {
-            try writer.writeByte(if (@typeInfo(S).Float.bits == 32)
+        fn serializeFloat(self: *Self, comptime S: type, value: S) WriteError!void {
+            try self.writer.writeByte(if (@typeInfo(S).Float.bits == 32)
                 format(.float_32)
             else
                 format(.float_64));
 
-            try writer.writeAll(std.mem.asBytes(&value));
+            try self.writer.writeAll(std.mem.asBytes(&value));
         }
 
         /// Serializes and writes a raw byte slice to the given `writer`
-        fn writeBin(value: []const u8, writer: anytype) (@TypeOf(writer).Error || SerializeError)!void {
+        fn serializeBin(self: *Self, value: []const u8) WriteError!void {
             const len = value.len;
             if (len == 0) return;
             if (len > max(u32)) return error.SliceTooLong;
+            const writer = self.writer;
+
             switch (len) {
                 0...max(u8) => try writer.writeByte(@intCast(u8, len)),
                 max(u8) + 1...max(u8) => {
@@ -459,10 +494,11 @@ pub fn MsgPack(comptime T: type) type {
         }
 
         /// Serializes the value as an array and writes each element to the `writer`
-        fn writeArray(comptime S: type, value: []const S, writer: anytype) (@TypeOf(writer).Error || SerializeError)!void {
+        fn serializeArray(self: *Self, comptime S: type, value: S) WriteError!void {
             const len = value.len;
             if (len == 0) return;
             if (len > max(u32)) return error.SliceTooLong;
+            const writer = self.writer;
 
             switch (len) {
                 0...max(u4) => try writer.writeByte(fixarray(@intCast(u4, len))),
@@ -477,32 +513,30 @@ pub fn MsgPack(comptime T: type) type {
                 else => unreachable,
             }
 
-            for (value) |val| try writeType(S, val, writer);
+            for (value) |val| try self.serializeTyped(meta.Child(S), val);
         }
 
         /// Serializes a pointer and writes its internal value to the `writer`
-        fn writePointer(comptime S: type, value: S, writer: anytype) (@TypeOf(writer).Error || SerializeError)!void {
+        fn serializePointer(self: *Self, comptime S: type, value: S) WriteError!void {
             const info = @typeInfo(S).Pointer;
             switch (info.size) {
-                .One => switch (@typeInfo(info.child)) {
-                    .Array => |array_info| try writeArray(array_info.child, value, writer),
-                    .Vector => |vector_info| try writeArray(vector_info.child, value, writer),
-                    else => {},
-                },
-                .Many, .C, .Slice => try writeArray(info.child, value, writer),
+                .One => try self.serializeTyped(S, value),
+                .Many, .C, .Slice => try self.serializeArray(S, value),
             }
         }
 
-        fn writeOptional(comptime S: type, value: ?S, writer: anytype) (@TypeOf(writer).Error || SerializeError)!void {
-            if (value) |val| try writeType(S, val, writer) else try writer.writeByte(format(.nil));
+        /// Serializes the given value to 'nil' if `null` or typed if the optional is not `null`
+        fn serializeOptional(self: *Self, comptime S: type, value: ?S) WriteError!void {
+            if (value) |val| try self.serializeTyped(S, val) else try self.writer.writeByte(format(.nil));
         }
 
         /// Serializes a struct into a map type and writes its to the given `writer`
-        fn writeMap(comptime S: type, value: S, writer: anytype) (@TypeOf(writer).Error || SerializeError)!void {
-            const fields = std.meta.fields(S);
+        fn serializeStruct(self: *Self, comptime S: type, value: S) WriteError!void {
+            const fields = meta.fields(S);
             const fields_len = fields.len;
             if (fields_len == 0) return;
             if (fields_len > max(u32)) return error.SliceTooLong;
+            const writer = self.writer;
 
             switch (fields_len) {
                 0...max(u4) => try writer.writeByte(fixmap(@intCast(u4, fields_len))),
@@ -516,18 +550,27 @@ pub fn MsgPack(comptime T: type) type {
                 },
             }
             inline for (fields) |field| {
-                try writeString(field.name, writer);
-                try writeType(field.field_type, @field(value, field.name), writer);
+                try self.serializeString(field.name);
+                try self.serializeTyped(field.field_type, @field(value, field.name));
             }
         }
     };
+}
+
+/// Function that creates a new generic that wraps around the given writer.
+/// Serializes given values into msgpack format
+///
+/// Custom serialization functions can be provided by declaring
+/// `serialize(*Self, anytype)!void` function
+pub fn serializer(writer: anytype) Serializer(@TypeOf(writer)) {
+    return Serializer(@TypeOf(writer)).init(writer);
 }
 
 test "Serialization" {
     const test_cases = .{
         .{
             .type = struct { compact: bool, schema: u7 },
-            .value = .{ .compact = true, .schema = 0 },
+            .value = .{ .compact = true, .schema = @as(u7, 0) },
             .expected = "\x82\xa7\x63\x6f\x6d\x70\x61\x63\x74\xc3\xa6\x73\x63\x68\x65\x6d\x61\x00",
         },
         .{
@@ -547,17 +590,17 @@ test "Serialization" {
         },
         .{
             .type = ?u32,
-            .value = 12389567,
+            .value = @as(u32, 12389567),
             .expected = "\xce\x00\xbd\x0c\xbf",
         },
     };
 
     inline for (test_cases) |case, i| {
-        const msg_pack = MsgPack(case.type);
         var buffer: [4096]u8 = undefined;
         var stream = std.io.fixedBufferStream(&buffer);
+        var _serializer = serializer(stream.writer());
 
-        try msg_pack.serialize(case.value, stream.writer());
+        try _serializer.serialize(case.value);
         testing.expectEqualSlices(u8, case.expected, stream.getWritten());
     }
 }
@@ -574,20 +617,24 @@ test "Deserialization" {
         },
         .{
             .type = struct { compact: bool, schema: u7 },
-            .value = .{ .compact = true, .schema = 5 },
+            .value = .{ .compact = true, .schema = @as(u7, 5) },
         },
         .{
             .type = []const []const u8,
             .value = &[_][]const u8{ "one", "two", "three" },
+        },
+        .{
+            .type = [5]u32,
+            .value = [5]u32{ 0, 2, 3, 5, 6 },
         },
     };
 
     inline for (test_cases) |case, i| {
         var buffer: [4096]u8 = undefined;
         var out = std.io.fixedBufferStream(&buffer);
-        const msg_pack = MsgPack(case.type);
+        var _serializer = serializer(out.writer());
 
-        try msg_pack.serialize(case.value, out.writer());
+        try _serializer.serialize(case.value);
 
         var in = std.io.fixedBufferStream(&buffer);
         var _deserializer = deserializer(in.reader(), 4096);
