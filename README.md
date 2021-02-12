@@ -38,9 +38,8 @@ const MyStruct = struct {
 };
 
 pub fn main() !void {
-    // create our msg pack serializer
     const serializer = msg_pack.serializer(some_given_writer);
-    const deserializer = msg_pack.deserializer(some_given_reader);
+    const deserializer = msg_pack.deserializer(some_given_reader, 4096); // 4096 is the internal buffer size
     
     // define our data
     const to_serialize = MyStruct{
