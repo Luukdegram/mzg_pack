@@ -81,9 +81,6 @@ fn fromByte(byte: u8) Format {
     return @intToEnum(Format, byte);
 }
 
-pub const SerializeError = error{SliceTooLong};
-pub const DeserializeError = error{MismatchingFormatType};
-
 /// Creates a generic Deserializater over the given ReaderType.
 /// Allows for deserializing msgpack data streams into given types using a buffer
 /// of given `size`.
@@ -98,7 +95,11 @@ pub fn Deserializer(comptime ReaderType: type, comptime size: usize) type {
 
         const Self = @This();
 
-        pub const Error = error{MismatchingFormatType} || ReaderType.Error;
+        pub const ReadError = error{
+            MismatchingFormatType,
+            EndOfStream,
+            BufferTooSmall,
+        } || ReaderType.Error;
 
         /// Initializes a new instance wrapper around the given `reader`
         pub fn init(reader: ReaderType) Self {
@@ -108,8 +109,7 @@ pub fn Deserializer(comptime ReaderType: type, comptime size: usize) type {
         /// Deserializes the msgpack stream into a value of type `T`
         /// use `deserializeInto` if the length written to `buffer` is required
         /// Note: Sets `index` to 0 to reuse the buffer and will overwrite all old data
-        pub fn deserialize(self: *Self, comptime T: type) !T {
-            self.index = 0;
+        pub fn deserialize(self: *Self, comptime T: type) ReadError!T {
             var value: T = undefined;
             _ = try self.deserializeInto(&value);
             return value;
@@ -117,7 +117,7 @@ pub fn Deserializer(comptime ReaderType: type, comptime size: usize) type {
 
         /// Deserializes the msgpack data stream into the given pointer.
         /// asserts `ptr` is a pointer
-        pub fn deserializeInto(self: *Self, ptr: anytype) !void {
+        pub fn deserializeInto(self: *Self, ptr: anytype) ReadError!void {
             const T = @TypeOf(ptr);
             comptime assert(trait.is(.Pointer)(T));
 
@@ -142,7 +142,7 @@ pub fn Deserializer(comptime ReaderType: type, comptime size: usize) type {
         }
 
         /// Deserializes a pointer to one or multiple items
-        pub fn deserializePointer(self: *Self, comptime T: type) !T {
+        pub fn deserializePointer(self: *Self, comptime T: type) ReadError!T {
             return switch (@typeInfo(T).Pointer.size) {
                 .One => try self.deserialize(T),
                 .Slice => try self.deserializeArray(T),
@@ -160,7 +160,7 @@ pub fn Deserializer(comptime ReaderType: type, comptime size: usize) type {
         }
 
         /// Deserializes a msgpack map into the given struct of type `T`
-        pub fn deserializeStruct(self: *Self, comptime T: type) !T {
+        pub fn deserializeStruct(self: *Self, comptime T: type) ReadError!T {
             const info = @typeInfo(T);
             if (info != .Struct) @compileError("Given type '" ++ @typeName(T) ++ "' is not a struct");
             const struct_info = info.Struct;
@@ -189,7 +189,7 @@ pub fn Deserializer(comptime ReaderType: type, comptime size: usize) type {
         }
 
         /// Deserializes a msgpack array into the given type `T`.
-        pub fn deserializeArray(self: *Self, comptime T: type) !T {
+        pub fn deserializeArray(self: *Self, comptime T: type) ReadError!T {
             const info = @typeInfo(T);
             if (comptime !trait.isSlice(T) and comptime info != .Array)
                 @compileError("Expected given type to be an array or slice, but instead got '" ++ @typeName(T) ++ "'");
@@ -218,7 +218,7 @@ pub fn Deserializer(comptime ReaderType: type, comptime size: usize) type {
         }
 
         /// Deserializes a msgpack string into a string
-        pub fn deserializeString(self: *Self) ![]const u8 {
+        pub fn deserializeString(self: *Self) ReadError![]const u8 {
             const string_byte = try self.reader.readByte();
 
             const len: u32 = switch (string_byte) {
@@ -236,7 +236,7 @@ pub fn Deserializer(comptime ReaderType: type, comptime size: usize) type {
         }
 
         /// Deserializes a msgpack binary data format serialized stream into a slice of bytes
-        pub fn deserializeBin(self: *Self) ![]u8 {
+        pub fn deserializeBin(self: *Self) ReadError![]u8 {
             const byte = try self.reader.readByte();
 
             const len: u32 = switch (byte) {
@@ -253,7 +253,7 @@ pub fn Deserializer(comptime ReaderType: type, comptime size: usize) type {
         }
 
         /// Deserializes the msgpack data into a boolean.
-        pub fn deserializeBool(self: *Self) !bool {
+        pub fn deserializeBool(self: *Self) ReadError!bool {
             return switch (try self.reader.readByte()) {
                 format(.@"true") => true,
                 format(.@"false") => false,
@@ -264,7 +264,7 @@ pub fn Deserializer(comptime ReaderType: type, comptime size: usize) type {
         /// Deserializes the data stream into an integer of type `T`.
         /// Returns `error.MismatchingFormatType` when the stream contains a different
         /// data type than `T`.
-        pub fn deserializeInt(self: *Self, comptime T: type) !T {
+        pub fn deserializeInt(self: *Self, comptime T: type) ReadError!T {
             if (@typeInfo(T) != .Int) @compileError("Expected integer type, but found type '" ++ @typeName(T) ++ "'");
 
             return if (comptime trait.isSignedInt(T))
@@ -274,7 +274,7 @@ pub fn Deserializer(comptime ReaderType: type, comptime size: usize) type {
         }
 
         /// Deserializes the data into an unsigned integer of type `T`
-        pub fn deserializeUnsignedInt(self: *Self, comptime T: type) !T {
+        pub fn deserializeUnsignedInt(self: *Self, comptime T: type) ReadError!T {
             if (comptime !trait.isUnsignedInt(T)) @compileError("Given type '" ++ @typeName(T) ++ "' is not an unsigned integer");
 
             const byte = try self.reader.readByte();
@@ -303,7 +303,7 @@ pub fn Deserializer(comptime ReaderType: type, comptime size: usize) type {
         }
 
         /// Deserializes the data into a signed integer of type `T`
-        pub fn deserializeSignedInt(self: *Self, comptime T: type) !T {
+        pub fn deserializeSignedInt(self: *Self, comptime T: type) ReadError!T {
             if (comptime !trait.isSignedInt(T)) @compileError("Given type '" ++ @typeName(T) ++ "' is not a signed integer");
 
             const byte = try self.reader.readByte();
@@ -332,7 +332,7 @@ pub fn Deserializer(comptime ReaderType: type, comptime size: usize) type {
         }
 
         /// Desiserializes the serialized data into `T` which must be of type `f32` or `f64`
-        pub fn deserializeFloat(self: *Self, comptime T: type) !T {
+        pub fn deserializeFloat(self: *Self, comptime T: type) ReadError!T {
             const float = try self.reader.readByte();
 
             switch (float) {
@@ -346,6 +346,12 @@ pub fn Deserializer(comptime ReaderType: type, comptime size: usize) type {
                 },
                 else => return error.MismatchingFormatType,
             }
+        }
+
+        /// Resets the internal buffer of `Self`. Calling any of the deserializing functions
+        /// after this will rewrite the buffer starting at index 0.
+        pub fn reset(self: *Self) void {
+            self.index = 0;
         }
     };
 }
@@ -366,7 +372,7 @@ pub fn Serializer(comptime WriterType: type) type {
 
         writer: WriterType,
 
-        pub const WriteError = SerializeError || WriterType.Error;
+        pub const WriteError = error{SliceTooLong} || WriterType.Error;
 
         /// Initializes a new instance of `Serializer(WriterType)`
         pub fn init(writer: WriterType) Self {
@@ -380,7 +386,7 @@ pub fn Serializer(comptime WriterType: type) type {
 
         /// Serializes the given type `S` into msgpack format and writes it to the writer
         /// of type `WriterType`
-        fn serializeTyped(self: *Self, comptime S: type, value: S) WriteError!void {
+        pub fn serializeTyped(self: *Self, comptime S: type, value: S) WriteError!void {
             switch (S) {
                 []const u8 => try self.serializeString(value),
                 []u8 => try self.serializeBin(value),
@@ -399,7 +405,7 @@ pub fn Serializer(comptime WriterType: type) type {
         }
 
         /// Serializes a string or byte array and writes it to the given `writer`
-        fn serializeString(self: *Self, value: []const u8) WriteError!void {
+        pub fn serializeString(self: *Self, value: []const u8) WriteError!void {
             const len = value.len;
             if (len == 0) return;
             if (len > max(u32)) return error.SliceTooLong;
@@ -422,43 +428,74 @@ pub fn Serializer(comptime WriterType: type) type {
             try self.writer.writeAll(value);
         }
 
-        /// Serializes an integer and writes it to the given `writer`
-        fn serializeInt(self: *Self, comptime S: type, value: S) WriteError!void {
-            const info = @typeInfo(S);
-            const int = info.Int;
-            const sign = int.signedness;
+        /// Serializes a signed or unsigned integer
+        pub fn serializeInt(self: *Self, comptime S: type, value: S) WriteError!void {
+            return if (comptime trait.isSignedInt(S))
+                self.serializeSignedInt(S, value)
+            else
+                self.serializeUnsignedInt(S, value);
+        }
 
-            if (sign == .unsigned and int.bits <= 7) return self.writer.writeByte(value);
-            if (sign == .signed and int.bits <= 5) return self.writer.writeByte(negint(value));
+        /// Serializes an unsigned integer
+        pub fn serializeUnsignedInt(self: *Self, comptime S: type, value: S) WriteError!void {
+            if (comptime !trait.isUnsignedInt(S))
+                compileError("Expected unsigned integer, but instead found type '" ++ @typeName(S) ++ "'");
 
-            switch (int.bits) {
-                0...8 => {
-                    try self.writer.writeByte(if (sign == .unsigned) format(.uint_8) else format(int_8));
-                    try self.writer.writeByte(@intCast(u8, value));
+            switch (meta.bitCount(S)) {
+                0...7 => try self.writer.writeByte(value),
+                8 => {
+                    try self.writer.writeByte(format(.uint_8));
+                    try self.writer.writeByte(value);
                 },
                 9...16 => {
-                    try self.writer.writeByte(if (sign == .unsigned) format(.uint_16) else format(int_16));
-                    try self.writer.writeIntBig(u16, @intCast(u16, value));
+                    try self.writer.writeByte(format(.uint_16));
+                    try self.writer.writeIntBig(u16, value);
                 },
                 17...32 => {
-                    try self.writer.writeByte(if (sign == .unsigned) format(.uint_32) else format(int_32));
-                    try self.writer.writeIntBig(u32, @intCast(u32, value));
+                    try self.writer.writeByte(format(.uint_32));
+                    try self.writer.writeIntBig(u32, value);
                 },
                 33...64 => {
-                    try self.writer.writeByte(if (sign == .unsigned) format(.uint_64) else format(int_64));
-                    try self.writer.writeIntBig(u64, @intCast(u64, value));
+                    try self.writer.writeByte(format(.uint_64));
+                    try self.writer.writeIntBig(u64, value);
+                },
+            }
+        }
+
+        /// Serializes and checks a signed integer
+        pub fn serializeSignedInt(self: *Self, comptime S: type, value: S) WriteError!void {
+            if (comptime !trait.isSignedInt(S))
+                compileError("Expected signed integer, but instead found type '" ++ @typeName(S) ++ "'");
+
+            switch (meta.bitCount(S)) {
+                0...5 => try self.writer.writeByte(negint(value)),
+                5...8 => {
+                    try self.writer.writeByte(format(.int_8));
+                    try self.writeIntBig(i8, value);
+                },
+                8...16 => {
+                    try self.writer.writeByte(format(.uint_16));
+                    try self.writeIntBig(i16, value);
+                },
+                16...32 => {
+                    try self.writer.writeByte(format(.uint_32));
+                    try self.writeIntBig(i32, value);
+                },
+                32...64 => {
+                    try self.writer.writeByte(format(.uint_64));
+                    try self.writeIntBig(i64, value);
                 },
             }
         }
 
         /// Serializes and writes the booleans value to the `writer`
-        fn serializeBool(self: *Self, value: bool) WriteError!void {
+        pub fn serializeBool(self: *Self, value: bool) WriteError!void {
             try self.writer.writeByte(if (value) format(.@"true") else format(.@"false"));
         }
 
         /// Serializes a 32 -or 64bit float and writes it to the `writer`
         /// TODO ensure big-endian byte order
-        fn serializeFloat(self: *Self, comptime S: type, value: S) WriteError!void {
+        pub fn serializeFloat(self: *Self, comptime S: type, value: S) WriteError!void {
             try self.writer.writeByte(if (@typeInfo(S).Float.bits == 32)
                 format(.float_32)
             else
@@ -468,7 +505,7 @@ pub fn Serializer(comptime WriterType: type) type {
         }
 
         /// Serializes and writes a raw byte slice to the given `writer`
-        fn serializeBin(self: *Self, value: []const u8) WriteError!void {
+        pub fn serializeBin(self: *Self, value: []const u8) WriteError!void {
             const len = value.len;
             if (len == 0) return;
             if (len > max(u32)) return error.SliceTooLong;
@@ -494,7 +531,7 @@ pub fn Serializer(comptime WriterType: type) type {
         }
 
         /// Serializes the value as an array and writes each element to the `writer`
-        fn serializeArray(self: *Self, comptime S: type, value: S) WriteError!void {
+        pub fn serializeArray(self: *Self, comptime S: type, value: S) WriteError!void {
             const len = value.len;
             if (len == 0) return;
             if (len > max(u32)) return error.SliceTooLong;
@@ -517,7 +554,7 @@ pub fn Serializer(comptime WriterType: type) type {
         }
 
         /// Serializes a pointer and writes its internal value to the `writer`
-        fn serializePointer(self: *Self, comptime S: type, value: S) WriteError!void {
+        pub fn serializePointer(self: *Self, comptime S: type, value: S) WriteError!void {
             const info = @typeInfo(S).Pointer;
             switch (info.size) {
                 .One => try self.serializeTyped(S, value),
@@ -526,12 +563,12 @@ pub fn Serializer(comptime WriterType: type) type {
         }
 
         /// Serializes the given value to 'nil' if `null` or typed if the optional is not `null`
-        fn serializeOptional(self: *Self, comptime S: type, value: ?S) WriteError!void {
+        pub fn serializeOptional(self: *Self, comptime S: type, value: ?S) WriteError!void {
             if (value) |val| try self.serializeTyped(S, val) else try self.writer.writeByte(format(.nil));
         }
 
         /// Serializes a struct into a map type and writes its to the given `writer`
-        fn serializeStruct(self: *Self, comptime S: type, value: S) WriteError!void {
+        pub fn serializeStruct(self: *Self, comptime S: type, value: S) WriteError!void {
             const fields = meta.fields(S);
             const fields_len = fields.len;
             if (fields_len == 0) return;
@@ -566,11 +603,11 @@ pub fn serializer(writer: anytype) Serializer(@TypeOf(writer)) {
     return Serializer(@TypeOf(writer)).init(writer);
 }
 
-test "Serialization" {
+test "serialization" {
     const test_cases = .{
         .{
             .type = struct { compact: bool, schema: u7 },
-            .value = .{ .compact = true, .schema = @as(u7, 0) },
+            .value = .{ .compact = true, .schema = 0 },
             .expected = "\x82\xa7\x63\x6f\x6d\x70\x61\x63\x74\xc3\xa6\x73\x63\x68\x65\x6d\x61\x00",
         },
         .{
@@ -590,7 +627,7 @@ test "Serialization" {
         },
         .{
             .type = ?u32,
-            .value = @as(u32, 12389567),
+            .value = 12389567,
             .expected = "\xce\x00\xbd\x0c\xbf",
         },
     };
@@ -605,7 +642,7 @@ test "Serialization" {
     }
 }
 
-test "Deserialization" {
+test "deserialization" {
     const test_cases = .{
         .{
             .type = []const u8,
@@ -617,7 +654,7 @@ test "Deserialization" {
         },
         .{
             .type = struct { compact: bool, schema: u7 },
-            .value = .{ .compact = true, .schema = @as(u7, 5) },
+            .value = .{ .compact = true, .schema = 5 },
         },
         .{
             .type = []const []const u8,
@@ -625,7 +662,7 @@ test "Deserialization" {
         },
         .{
             .type = [5]u32,
-            .value = [5]u32{ 0, 2, 3, 5, 6 },
+            .value = .{ 0, 2, 3, 5, 6 },
         },
     };
 

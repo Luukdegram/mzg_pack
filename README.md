@@ -14,23 +14,23 @@
 	- [x] Bool
 	- [ ] Ext
 	- [ ] Timestamp
-	- [ ] Uf8 string (out of scope)
+	- [ ] Uf8 string 
 - [ ] deserialization
-	- [ ] String
-	- [ ] Integers
-	- [ ] Nil
-	- [ ] Floats
-	- [ ] Bin
-	- [ ] Array
-	- [ ] Map
-	- [ ] Bool
+	- [x] String
+	- [x] Integers
+	- [x] Nil
+	- [x] Floats
+	- [x] Bin
+	- [x] Array
+	- [x] Map
+	- [x] Bool
 	- [ ] Ext
 	- [ ] Timestamp
-	- [ ] Uf8 string (out of scope)
+	- [ ] Uf8 string 
 
 ## Example
 ```zig
-const mp = @import("mzg_pack");
+const msg_pack = @import("mzg_pack");
 
 const MyStruct = struct {
     x: u64,
@@ -38,12 +38,10 @@ const MyStruct = struct {
 };
 
 pub fn main() !void {
-    // create our msg pack object
-    const msg_pack = mp.MsgPack(MyStruct);
-
-    // use a writer, in this case we write to stdout
-    const writer = std.io.getStdOut().writer();
-
+    // create our msg pack serializer
+    const serializer = msg_pack.serializer(some_given_writer);
+    const deserializer = msg_pack.deserializer(some_given_reader);
+    
     // define our data
     const to_serialize = MyStruct{
         .x = 23059,
@@ -51,7 +49,9 @@ pub fn main() !void {
     };
 
     // Finally, serialize the data
-    try msg_pack.serialize(to_serialize, writer);
+    try serializer.serialize(to_serialize);
+    
+    const result = try deserializer.deserialize(MyStruct); // result == to_serialize
 }
 ```
 
