@@ -600,7 +600,7 @@ test "Serialization" {
         var stream = std.io.fixedBufferStream(&buffer);
         var _serializer = serializer(stream.writer());
 
-        try _serializer.serialize(case.value);
+        try _serializer.serialize(@as(case.type, case.value));
         testing.expectEqualSlices(u8, case.expected, stream.getWritten());
     }
 }
@@ -634,7 +634,7 @@ test "Deserialization" {
         var out = std.io.fixedBufferStream(&buffer);
         var _serializer = serializer(out.writer());
 
-        try _serializer.serialize(case.value);
+        try _serializer.serialize(@as(case.type, case.value));
 
         var in = std.io.fixedBufferStream(&buffer);
         var _deserializer = deserializer(in.reader(), 4096);
