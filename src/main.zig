@@ -376,6 +376,29 @@ pub fn Deserializer(comptime ReaderType: type, comptime size: usize) type {
             }
         }
 
+        /// Deserializes extension data and sets the given `type` value
+        pub fn deserializeExt(self: *Self, data_type: *i8) ReadError![]const u8 {
+            const reader = self.reader;
+            const byte = try reader.readByte();
+
+            const len: u32 = switch (byte) {
+                format(.fixext_1) => 1,
+                format(.fixext_2) => 2,
+                format(.fixext_4) => 4,
+                format(.fixext_8) => 8,
+                format(.fixext_16) => 16,
+                format(.ext_8) => try reader.readByte(),
+                format(.ext_16) => try reader.readIntBig(u16),
+                format(.ext_32) => try reader.readIntBig(u32),
+                else => return error.MismatchingFormatType,
+            };
+
+            data_type.* = try reader.readIntBig(i8);
+            const old = self.index;
+            self.index += try reader.readAll(self.buffer[old .. old + len]);
+            return self.buffer[old..self.index];
+        }
+
         /// Resets the internal buffer of `Self`. Calling any of the deserializing functions
         /// after this will rewrite the buffer starting at index 0.
         pub fn reset(self: *Self) void {
@@ -651,6 +674,40 @@ pub fn Serializer(comptime WriterType: type) type {
                 try self.serializeTyped(field.field_type, @field(value, field.name));
             }
         }
+
+        /// Serializes extension data
+        pub fn serializeExt(
+            self: *Self,
+            data_type: i8,
+            data: []const u8,
+        ) WriteError!void {
+            const writer = self.writer;
+            const format_byte = if (data.len <= 16 and std.math.isPowerOfTwo(data.len)) switch (data.len) {
+                1 => format(.fixext_1),
+                2 => format(.fixext_2),
+                4 => format(.fixext_4),
+                8 => format(.fixext_8),
+                16 => format(.fixext_16),
+                else => unreachable,
+            } else switch (data.len) {
+                0...max(u8) => format(.ext_8),
+                max(u8) + 1...max(u16) => format(.ext_16),
+                max(u16) + 1...max(u32) => format(.ext_32),
+                else => return error.SliceTooLong,
+            };
+
+            try writer.writeByte(format_byte);
+            if (data.len > 16 or !std.math.isPowerOfTwo(data.len)) {
+                switch (data.len) {
+                    0...max(u8) => try writer.writeByte(@intCast(u8, data.len)),
+                    max(u8) + 1...max(u16) => try writer.writeIntBig(u16, @intCast(u16, data.len)),
+                    max(u16) + 1...max(u32) => try writer.writeIntBig(u32, @intCast(u32, data.len)),
+                    else => unreachable,
+                }
+            }
+            try writer.writeIntBig(i8, data_type);
+            try writer.writeAll(data);
+        }
     };
 }
 
@@ -768,4 +825,20 @@ test "(de)serialize timestamp" {
     const result = try _deserializer.deserializeTimestamp();
 
     testing.expectEqual(timestamp, result);
+}
+
+test "(de)serialize ext format" {
+    var buffer: [4096]u8 = undefined;
+    var out = std.io.fixedBufferStream(&buffer);
+    var _serializer = serializer(out.writer());
+
+    var in = std.io.fixedBufferStream(&buffer);
+    var _deserializer = deserializer(in.reader(), 4096);
+
+    try _serializer.serializeExt(2, "Hello world!");
+
+    var type_result: i8 = undefined;
+    const result = try _deserializer.deserializeExt(&type_result);
+    testing.expectEqual(@as(i8, 2), type_result);
+    testing.expectEqualStrings("Hello world!", result);
 }
