@@ -81,6 +81,9 @@ fn fromByte(byte: u8) Format {
     return @intToEnum(Format, byte);
 }
 
+/// Represents a timestamp that can be (de)serialized
+pub const Timestamp = struct { sec: u32, nsec: i64 };
+
 /// Creates a generic Deserializater over the given ReaderType.
 /// Allows for deserializing msgpack data streams into given types using a buffer
 /// of given `size`.
@@ -149,6 +152,31 @@ pub fn Deserializer(comptime ReaderType: type, comptime size: usize) type {
                 .Many => try self.deserializeArray(T),
                 .C => @compileError("Unsupported pointer type C"),
             };
+        }
+
+        /// Deserializes a timestamp into a struct of sec(u32) and nsec(i64)
+        pub fn deserializeTimestamp(self: *Self) ReadError!Timestamp {
+            const byte = try self.reader.readByte();
+
+            switch (byte) {
+                format(.fixext_4) => {
+                    _ = try self.reader.readByte(); // skip '-1' byte
+                    const sec = try self.reader.readIntBig(u32);
+                    return Timestamp{ .sec = sec, .nsec = 0 };
+                },
+                format(.fixext_8) => {
+                    _ = try self.reader.readByte(); // skip '-1' byte
+                    const data = try self.reader.readIntBig(u64);
+                    return Timestamp{ .sec = @intCast(u32, data & 0x00000003ffffffff), .nsec = @intCast(i64, data >> 34) };
+                },
+                format(.ext_8) => {
+                    _ = try self.reader.readIntBig(u16); // skip first 2 bytes
+                    const sec = try self.reader.readIntBig(u32);
+                    const nsec = try self.reader.readIntBig(i64);
+                    return Timestamp{ .sec = sec, .nsec = nsec };
+                },
+                else => return error.MismatchingFormatType,
+            }
         }
 
         /// Deserializes the data stream to `null`. Returns an error
@@ -387,6 +415,9 @@ pub fn Serializer(comptime WriterType: type) type {
         /// Serializes the given type `S` into msgpack format and writes it to the writer
         /// of type `WriterType`
         pub fn serializeTyped(self: *Self, comptime S: type, value: S) WriteError!void {
+            if (comptime trait.is(.Pointer)(S) and comptime trait.hasFn("deserialize")(S))
+                return value.deserialize(ptr, self);
+
             switch (S) {
                 []const u8 => try self.serializeString(value),
                 []u8 => try self.serializeBin(value),
@@ -394,13 +425,42 @@ pub fn Serializer(comptime WriterType: type) type {
                     .Int => try self.serializeInt(S, value),
                     .Bool => try self.serializeBool(value),
                     .Float => try self.serializeFloat(S, value),
-                    .Null => try self.writer.writeByte(format(.nil)),
+                    .Null => try self.serializeNull(),
                     .Struct => try self.serializeStruct(S, value),
                     .Array => |array| try self.serializeArray(S, value),
                     .Pointer => try self.serializePointer(S, value),
                     .Optional => |opt| try self.serializeOptional(opt.child, value),
                     else => @compileError("Unsupported type '" ++ @typeName(S) ++ "'"),
                 },
+            }
+        }
+
+        /// Serializes a 'nil' byte
+        pub fn serializeNull(self: *Self) WriteError!void {
+            try self.writer.writeByte(format(.nil));
+        }
+
+        /// Serializes a timestamp for the given `timestamp` value
+        pub fn serializeTimestamp(self: *Self, timestamp: Timestamp) WriteError!void {
+            const writer = self.writer;
+            if (@as(u64, timestamp.sec) >> 34 == 0) {
+                const data: u64 = (@intCast(u64, timestamp.nsec) << 34) | timestamp.sec;
+
+                if (data & 0xffffffff00000000 == 0) {
+                    try writer.writeByte(format(.fixext_4));
+                    try writer.writeIntBig(i8, -1);
+                    try writer.writeIntBig(u32, @intCast(u32, data));
+                } else {
+                    try writer.writeByte(format(.fixext_8));
+                    try writer.writeIntBig(i8, -1);
+                    try writer.writeIntBig(u64, data);
+                }
+            } else {
+                try writer.writeByte(format(.ext_8));
+                try writer.writeByte(12);
+                try writer.writeIntBig(i8, -1);
+                try writer.writeIntBig(u32, timestamp.sec);
+                try writer.writeIntBig(i64, timestamp.nsec);
             }
         }
 
@@ -692,4 +752,20 @@ test "deserialization" {
             },
         }
     }
+}
+
+test "(de)serialize timestamp" {
+    var buffer: [4096]u8 = undefined;
+    var out = std.io.fixedBufferStream(&buffer);
+    var _serializer = serializer(out.writer());
+
+    var in = std.io.fixedBufferStream(&buffer);
+    var _deserializer = deserializer(in.reader(), 4096);
+
+    const timestamp = Timestamp{ .sec = 50, .nsec = 200 };
+    try _serializer.serializeTimestamp(timestamp);
+
+    const result = try _deserializer.deserializeTimestamp();
+
+    testing.expectEqual(timestamp, result);
 }
