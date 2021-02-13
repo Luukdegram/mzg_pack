@@ -1,7 +1,6 @@
 const std = @import("std");
 const meta = std.meta;
 const trait = meta.trait;
-const testing = std.testing;
 const max = std.math.maxInt;
 const assert = std.debug.assert;
 
@@ -181,7 +180,7 @@ pub fn Deserializer(comptime ReaderType: type, comptime size: usize) type {
 
         /// Deserializes the data stream to `null`. Returns an error
         /// if the data does not correspond to the right format
-        pub fn deserializeNull(self: *Self) !null {
+        pub fn deserializeNull(self: *Self) ReadError!null {
             const byte = try self.reader.readByte();
             if (byte != format(.nil)) return error.MismatchingFormatType;
             return null;
@@ -361,6 +360,7 @@ pub fn Deserializer(comptime ReaderType: type, comptime size: usize) type {
 
         /// Desiserializes the serialized data into `T` which must be of type `f32` or `f64`
         pub fn deserializeFloat(self: *Self, comptime T: type) ReadError!T {
+            comptime assert(trait.isFloat(T));
             const float = try self.reader.readByte();
 
             switch (float) {
@@ -423,7 +423,7 @@ pub fn Serializer(comptime WriterType: type) type {
 
         writer: WriterType,
 
-        pub const WriteError = error{SliceTooLong} || WriterType.Error;
+        pub const WriteError = error{ SliceTooLong, integerTooBig } || WriterType.Error;
 
         /// Initializes a new instance of `Serializer(WriterType)`
         pub fn init(writer: WriterType) Self {
@@ -438,8 +438,8 @@ pub fn Serializer(comptime WriterType: type) type {
         /// Serializes the given type `S` into msgpack format and writes it to the writer
         /// of type `WriterType`
         pub fn serializeTyped(self: *Self, comptime S: type, value: S) WriteError!void {
-            if (comptime trait.is(.Pointer)(S) and comptime trait.hasFn("deserialize")(S))
-                return value.deserialize(ptr, self);
+            if (comptime trait.hasFn("serialize")(S))
+                return value.serialize(self);
 
             switch (S) {
                 []const u8 => try self.serializeString(value),
@@ -523,8 +523,7 @@ pub fn Serializer(comptime WriterType: type) type {
         pub fn serializeUnsignedInt(self: *Self, comptime S: type, value: S) WriteError!void {
             if (comptime !trait.isUnsignedInt(S))
                 compileError("Expected unsigned integer, but instead found type '" ++ @typeName(S) ++ "'");
-
-            switch (meta.bitCount(S)) {
+            switch (comptime meta.bitCount(S)) {
                 0...7 => try self.writer.writeByte(value),
                 8 => {
                     try self.writer.writeByte(format(.uint_8));
@@ -542,6 +541,7 @@ pub fn Serializer(comptime WriterType: type) type {
                     try self.writer.writeByte(format(.uint_64));
                     try self.writer.writeIntBig(u64, value);
                 },
+                else => return error.integerTooBig,
             }
         }
 
@@ -550,7 +550,7 @@ pub fn Serializer(comptime WriterType: type) type {
             if (comptime !trait.isSignedInt(S))
                 compileError("Expected signed integer, but instead found type '" ++ @typeName(S) ++ "'");
 
-            switch (meta.bitCount(S)) {
+            switch (comptime meta.bitCount(S)) {
                 0...5 => try self.writer.writeByte(negint(value)),
                 5...8 => {
                     try self.writer.writeByte(format(.int_8));
@@ -568,6 +568,7 @@ pub fn Serializer(comptime WriterType: type) type {
                     try self.writer.writeByte(format(.uint_64));
                     try self.writeIntBig(i64, value);
                 },
+                else => return error.integerTooBig,
             }
         }
 
@@ -579,6 +580,7 @@ pub fn Serializer(comptime WriterType: type) type {
         /// Serializes a 32 -or 64bit float and writes it to the `writer`
         /// TODO ensure big-endian byte order
         pub fn serializeFloat(self: *Self, comptime S: type, value: S) WriteError!void {
+            comptime assert(trait.isFloat(S));
             try self.writer.writeByte(if (@typeInfo(S).Float.bits == 32)
                 format(.float_32)
             else
@@ -638,8 +640,7 @@ pub fn Serializer(comptime WriterType: type) type {
 
         /// Serializes a pointer and writes its internal value to the `writer`
         pub fn serializePointer(self: *Self, comptime S: type, value: S) WriteError!void {
-            const info = @typeInfo(S).Pointer;
-            switch (info.size) {
+            switch (@typeInfo(S).Pointer.size) {
                 .One => try self.serializeTyped(S, value),
                 .Many, .C, .Slice => try self.serializeArray(S, value),
             }
@@ -652,10 +653,12 @@ pub fn Serializer(comptime WriterType: type) type {
 
         /// Serializes a struct into a map type and writes its to the given `writer`
         pub fn serializeStruct(self: *Self, comptime S: type, value: S) WriteError!void {
+            comptime assert(@typeInfo(S) == .Struct);
             const fields = meta.fields(S);
             const fields_len = fields.len;
+            comptime assert(fields_len <= max(u32));
+
             if (fields_len == 0) return;
-            if (fields_len > max(u32)) return error.SliceTooLong;
             const writer = self.writer;
 
             switch (fields_len) {
@@ -720,125 +723,6 @@ pub fn serializer(writer: anytype) Serializer(@TypeOf(writer)) {
     return Serializer(@TypeOf(writer)).init(writer);
 }
 
-test "serialization" {
-    const test_cases = .{
-        .{
-            .type = struct { compact: bool, schema: u7 },
-            .value = .{ .compact = true, .schema = 0 },
-            .expected = "\x82\xa7\x63\x6f\x6d\x70\x61\x63\x74\xc3\xa6\x73\x63\x68\x65\x6d\x61\x00",
-        },
-        .{
-            .type = []const u8,
-            .value = "Hello world!",
-            .expected = "\xac\x48\x65\x6c\x6c\x6f\x20\x77\x6f\x72\x6c\x64\x21",
-        },
-        .{
-            .type = []const []const u8,
-            .value = &[_][]const u8{ "one", "two", "three" },
-            .expected = "\x93\xa3\x6f\x6e\x65\xa3\x74\x77\x6f\xa5\x74\x68\x72\x65\x65",
-        },
-        .{
-            .type = ?u32,
-            .value = null,
-            .expected = "\xc0",
-        },
-        .{
-            .type = ?u32,
-            .value = 12389567,
-            .expected = "\xce\x00\xbd\x0c\xbf",
-        },
-    };
-
-    inline for (test_cases) |case, i| {
-        var buffer: [4096]u8 = undefined;
-        var stream = std.io.fixedBufferStream(&buffer);
-        var _serializer = serializer(stream.writer());
-
-        try _serializer.serialize(@as(case.type, case.value));
-        testing.expectEqualSlices(u8, case.expected, stream.getWritten());
-    }
-}
-
-test "deserialization" {
-    const test_cases = .{
-        .{
-            .type = []const u8,
-            .value = "Hello world!",
-        },
-        .{
-            .type = u32,
-            .value = @as(u32, 21049),
-        },
-        .{
-            .type = struct { compact: bool, schema: u7 },
-            .value = .{ .compact = true, .schema = 5 },
-        },
-        .{
-            .type = []const []const u8,
-            .value = &[_][]const u8{ "one", "two", "three" },
-        },
-        .{
-            .type = [5]u32,
-            .value = .{ 0, 2, 3, 5, 6 },
-        },
-    };
-
-    inline for (test_cases) |case, i| {
-        var buffer: [4096]u8 = undefined;
-        var out = std.io.fixedBufferStream(&buffer);
-        var _serializer = serializer(out.writer());
-
-        try _serializer.serialize(@as(case.type, case.value));
-
-        var in = std.io.fixedBufferStream(&buffer);
-        var _deserializer = deserializer(in.reader(), 4096);
-
-        const result = try _deserializer.deserialize(case.type);
-
-        switch (case.type) {
-            []const u8 => testing.expectEqualStrings(case.value, result),
-            []u8 => testing.expectEqualSlices(u8, case.value, result),
-            else => switch (@typeInfo(case.type)) {
-                .Pointer => |info| switch (info.size) {
-                    .Slice => for (case.value) |val, j| {
-                        testing.expectEqualSlices(meta.Child(info.child), val, result[j]);
-                    },
-                    else => @panic("TODO: Testing for Pointer types"),
-                },
-                else => testing.expectEqual(@as(case.type, case.value), result),
-            },
-        }
-    }
-}
-
-test "(de)serialize timestamp" {
-    var buffer: [4096]u8 = undefined;
-    var out = std.io.fixedBufferStream(&buffer);
-    var _serializer = serializer(out.writer());
-
-    var in = std.io.fixedBufferStream(&buffer);
-    var _deserializer = deserializer(in.reader(), 4096);
-
-    const timestamp = Timestamp{ .sec = 50, .nsec = 200 };
-    try _serializer.serializeTimestamp(timestamp);
-
-    const result = try _deserializer.deserializeTimestamp();
-
-    testing.expectEqual(timestamp, result);
-}
-
-test "(de)serialize ext format" {
-    var buffer: [4096]u8 = undefined;
-    var out = std.io.fixedBufferStream(&buffer);
-    var _serializer = serializer(out.writer());
-
-    var in = std.io.fixedBufferStream(&buffer);
-    var _deserializer = deserializer(in.reader(), 4096);
-
-    try _serializer.serializeExt(2, "Hello world!");
-
-    var type_result: i8 = undefined;
-    const result = try _deserializer.deserializeExt(&type_result);
-    testing.expectEqual(@as(i8, 2), type_result);
-    testing.expectEqualStrings("Hello world!", result);
+test {
+    _ = @import("tests.zig");
 }
