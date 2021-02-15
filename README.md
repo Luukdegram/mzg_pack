@@ -1,6 +1,6 @@
 # mzg_pack
 
-[Message pack](https://https://msgpack.org/) (de)serialization library for Zig.
+[Message pack](https://msgpack.org/) (de)serialization library for Zig.
 
 ## progress
 - [x] serialization
