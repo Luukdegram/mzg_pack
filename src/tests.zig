@@ -33,13 +33,13 @@ test "serialization" {
         },
     };
 
-    inline for (test_cases) |case, i| {
+    inline for (test_cases) |case| {
         var buffer: [4096]u8 = undefined;
         var stream = std.io.fixedBufferStream(&buffer);
         var _serializer = serializer(stream.writer());
 
         try _serializer.serialize(@as(case.type, case.value));
-        testing.expectEqualSlices(u8, case.expected, stream.getWritten());
+        try testing.expectEqualSlices(u8, case.expected, stream.getWritten());
     }
 }
 
@@ -67,7 +67,7 @@ test "deserialization" {
         },
     };
 
-    inline for (test_cases) |case, i| {
+    inline for (test_cases) |case| {
         var buffer: [4096]u8 = undefined;
         var out = std.io.fixedBufferStream(&buffer);
         var _serializer = serializer(out.writer());
@@ -80,16 +80,16 @@ test "deserialization" {
         const result = try _deserializer.deserialize(case.type);
 
         switch (case.type) {
-            []const u8 => testing.expectEqualStrings(case.value, result),
-            []u8 => testing.expectEqualSlices(u8, case.value, result),
+            []const u8 => try testing.expectEqualStrings(case.value, result),
+            []u8 => try testing.expectEqualSlices(u8, case.value, result),
             else => switch (@typeInfo(case.type)) {
                 .Pointer => |info| switch (info.size) {
                     .Slice => for (case.value) |val, j| {
-                        testing.expectEqualSlices(meta.Child(info.child), val, result[j]);
+                        try testing.expectEqualSlices(meta.Child(info.child), val, result[j]);
                     },
                     else => @panic("TODO: Testing for Pointer types"),
                 },
-                else => testing.expectEqual(@as(case.type, case.value), result),
+                else => try testing.expectEqual(@as(case.type, case.value), result),
             },
         }
     }
@@ -108,7 +108,7 @@ test "(de)serialize timestamp" {
 
     const result = try _deserializer.deserializeTimestamp();
 
-    testing.expectEqual(timestamp, result);
+    try testing.expectEqual(timestamp, result);
 }
 
 test "(de)serialize ext format" {
@@ -123,8 +123,8 @@ test "(de)serialize ext format" {
 
     var type_result: i8 = undefined;
     const result = try _deserializer.deserializeExt(&type_result);
-    testing.expectEqual(@as(i8, 2), type_result);
-    testing.expectEqualStrings("Hello world!", result);
+    try testing.expectEqual(@as(i8, 2), type_result);
+    try testing.expectEqualStrings("Hello world!", result);
 }
 
 pub const Decl = struct {
@@ -159,5 +159,5 @@ test "(de)serialize with custom declaration" {
     try _serializer.serialize(decl);
 
     const result = try _deserializer.deserialize(Decl);
-    testing.expectEqual(decl, result);
+    try testing.expectEqual(decl, result);
 }

@@ -190,7 +190,6 @@ pub fn Deserializer(comptime ReaderType: type, comptime size: usize) type {
         pub fn deserializeStruct(self: *Self, comptime T: type) ReadError!T {
             const info = @typeInfo(T);
             if (info != .Struct) @compileError("Given type '" ++ @typeName(T) ++ "' is not a struct");
-            const struct_info = info.Struct;
 
             const byte = try self.reader.readByte();
             const len: u32 = switch (byte) {
@@ -218,7 +217,7 @@ pub fn Deserializer(comptime ReaderType: type, comptime size: usize) type {
         /// Deserializes a msgpack array into the given type `T`.
         pub fn deserializeArray(self: *Self, comptime T: type) ReadError!T {
             const info = @typeInfo(T);
-            if (comptime !trait.isSlice(T) and comptime info != .Array)
+            if (comptime !trait.isSlice(T) and info != .Array)
                 @compileError("Expected given type to be an array or slice, but instead got '" ++ @typeName(T) ++ "'");
 
             const byte = try self.reader.readByte();
@@ -230,12 +229,16 @@ pub fn Deserializer(comptime ReaderType: type, comptime size: usize) type {
             };
 
             if (comptime trait.isSlice(T)) {
-                var t_buf: [1024]meta.Child(T) = undefined;
+                const t_buf = std.mem.bytesAsSlice(
+                    meta.Child(T),
+                    self.buffer[self.index..][0 .. len * @sizeOf(meta.Child(T))],
+                );
+                self.index += len * @sizeOf(meta.Child(T));
                 for (t_buf) |*v, i| {
                     try self.deserializeInto(v);
                     if (i == len - 1) break;
                 }
-                return t_buf[0..len];
+                return @alignCast(@alignOf([]meta.Child(T)), t_buf);
             } else {
                 const array_len = info.Array.len;
                 var t_buf: [array_len]info.Array.child = undefined;
@@ -450,7 +453,7 @@ pub fn Serializer(comptime WriterType: type) type {
                     .Float => try self.serializeFloat(S, value),
                     .Null => try self.serializeNull(),
                     .Struct => try self.serializeStruct(S, value),
-                    .Array => |array| try self.serializeArray(S, value),
+                    .Array => try self.serializeArray(S, value),
                     .Pointer => try self.serializePointer(S, value),
                     .Optional => |opt| try self.serializeOptional(opt.child, value),
                     else => @compileError("Unsupported type '" ++ @typeName(S) ++ "'"),
