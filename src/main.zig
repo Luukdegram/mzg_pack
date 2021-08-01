@@ -557,19 +557,19 @@ pub fn Serializer(comptime WriterType: type) type {
                 0...5 => try self.writer.writeByte(negint(value)),
                 5...8 => {
                     try self.writer.writeByte(format(.int_8));
-                    try self.writeIntBig(i8, value);
+                    try self.writer.writeIntBig(i8, value);
                 },
                 8...16 => {
-                    try self.writer.writeByte(format(.uint_16));
-                    try self.writeIntBig(i16, value);
+                    try self.writer.writeByte(format(.int_16));
+                    try self.writer.writeIntBig(i16, value);
                 },
                 16...32 => {
-                    try self.writer.writeByte(format(.uint_32));
-                    try self.writeIntBig(i32, value);
+                    try self.writer.writeByte(format(.int_32));
+                    try self.writer.writeIntBig(i32, value);
                 },
                 32...64 => {
-                    try self.writer.writeByte(format(.uint_64));
-                    try self.writeIntBig(i64, value);
+                    try self.writer.writeByte(format(.int_64));
+                    try self.writer.writeIntBig(i64, value);
                 },
                 else => return error.integerTooBig,
             }

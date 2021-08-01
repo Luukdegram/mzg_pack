@@ -31,6 +31,11 @@ test "serialization" {
             .value = 12389567,
             .expected = "\xce\x00\xbd\x0c\xbf",
         },
+        .{
+            .type = i32,
+            .value = -12389567,
+            .expected = "\xd2\xff\x42\xf3\x41",
+        },
     };
 
     inline for (test_cases) |case| {
@@ -52,6 +57,10 @@ test "deserialization" {
         .{
             .type = u32,
             .value = @as(u32, 21049),
+        },
+        .{
+            .type = i64,
+            .value = @as(i64, 9223372036854775807),
         },
         .{
             .type = struct { compact: bool, schema: u7 },
