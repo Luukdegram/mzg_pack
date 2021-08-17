@@ -36,7 +36,11 @@ test "serialization" {
             .value = -12389567,
             .expected = "\xd2\xff\x42\xf3\x41",
         },
-        .{ .type = f64, .value = 1.25, .expected = "\xcb\x3f\xf4\x00\x00\x00\x00\x00\x00" },
+        .{ 
+            .type = f64, 
+            .value = 1.25, 
+            .expected = "\xcb\x3f\xf4\x00\x00\x00\x00\x00\x00",
+        },
     };
 
     inline for (test_cases) |case| {
