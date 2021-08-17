@@ -91,6 +91,15 @@ test "deserialization" {
             .type = []const f64,
             .value = &[_]f64{ -100.455, 2.0, 3.1415 },
         },
+        .{
+            .type = struct { us: []const u8, fs: []const f64 },
+            .value = .{ .us = &[_]u8{
+                1,
+                2,
+                15,
+                16,
+            }, .fs = &[_]f64{ 1.2, 3.14 } },
+        },
     };
 
     inline for (test_cases) |case| {
@@ -105,20 +114,28 @@ test "deserialization" {
 
         const result = try _deserializer.deserialize(case.type);
 
-        switch (case.type) {
-            []const u8 => try testing.expectEqualStrings(case.value, result),
-            []u8 => try testing.expectEqualSlices(u8, case.value, result),
-            []const f64 => try testing.expectEqualSlices(f64, case.value, result),
-            else => switch (@typeInfo(case.type)) {
-                .Pointer => |info| switch (info.size) {
-                    .Slice => for (case.value) |val, j| {
-                        try testing.expectEqualSlices(meta.Child(info.child), val, result[j]);
-                    },
-                    else => @panic("TODO: Testing for Pointer types"),
+        try expectEqualDeep(case.type, case.value, result);
+    }
+}
+
+fn expectEqualDeep(comptime T: type, value: T, result: T) !void {
+    switch (@typeInfo(T)) {
+        .Pointer => |info| switch (info.size) {
+            .Slice => switch (@typeInfo(info.child)) {
+                .Pointer => for (value) |val, i| {
+                    try expectEqualDeep(info.child, val, result[i]);
                 },
-                else => try testing.expectEqual(@as(case.type, case.value), result),
+                else => try testing.expectEqualSlices(info.child, value, result),
             },
-        }
+            else => @panic("TODO: Testing for Pointer types"),
+        },
+        .Array => |info| {
+            try testing.expectEqualSlices(info.child, value[0..], result[0..]);
+        },
+        .Struct => |st| inline for (st.fields) |field| {
+            try expectEqualDeep(field.field_type, @field(value, field.name), @field(result, field.name));
+        },
+        else => try testing.expectEqual(value, result),
     }
 }
 
