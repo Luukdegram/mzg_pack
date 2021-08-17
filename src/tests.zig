@@ -97,7 +97,6 @@ test "deserialization" {
                 1,
                 2,
                 15,
-                16,
             }, .fs = &[_]f64{ 1.2, 3.14 } },
         },
     };
@@ -110,7 +109,10 @@ test "deserialization" {
         try _serializer.serialize(@as(case.type, case.value));
 
         var in = std.io.fixedBufferStream(&buffer);
-        var _deserializer = deserializer(in.reader(), 4096);
+
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        var _deserializer = deserializer(in.reader(), &arena.allocator);
 
         const result = try _deserializer.deserialize(case.type);
 
@@ -145,7 +147,9 @@ test "(de)serialize timestamp" {
     var _serializer = serializer(out.writer());
 
     var in = std.io.fixedBufferStream(&buffer);
-    var _deserializer = deserializer(in.reader(), 4096);
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var _deserializer = deserializer(in.reader(), &arena.allocator);
 
     const timestamp = Timestamp{ .sec = 50, .nsec = 200 };
     try _serializer.serializeTimestamp(timestamp);
@@ -161,7 +165,9 @@ test "(de)serialize ext format" {
     var _serializer = serializer(out.writer());
 
     var in = std.io.fixedBufferStream(&buffer);
-    var _deserializer = deserializer(in.reader(), 4096);
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var _deserializer = deserializer(in.reader(), &arena.allocator);
 
     try _serializer.serializeExt(2, "Hello world!");
 
@@ -197,7 +203,9 @@ test "(de)serialize with custom declaration" {
     var _serializer = serializer(out.writer());
 
     var in = std.io.fixedBufferStream(&buffer);
-    var _deserializer = deserializer(in.reader(), 4096);
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var _deserializer = deserializer(in.reader(), &arena.allocator);
 
     var decl = Decl{ .x = 10, .y = 50 };
     try _serializer.serialize(decl);

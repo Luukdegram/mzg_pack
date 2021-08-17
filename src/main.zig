@@ -89,11 +89,10 @@ pub const Timestamp = struct { sec: u32, nsec: i64 };
 ///
 /// It is possible to define your custom deserialization function for a given type
 /// by defining a `deserialize(*Self, anytype)` function
-pub fn Deserializer(comptime ReaderType: type, comptime size: usize) type {
+pub fn Deserializer(comptime ReaderType: type) type {
     return struct {
         reader: ReaderType,
-        buffer: [size]u8,
-        index: usize,
+        allocator: *std.mem.Allocator,
 
         const Self = @This();
 
@@ -101,11 +100,11 @@ pub fn Deserializer(comptime ReaderType: type, comptime size: usize) type {
             MismatchingFormatType,
             EndOfStream,
             BufferTooSmall,
-        } || ReaderType.Error;
+        } || ReaderType.Error || std.mem.Allocator.Error;
 
         /// Initializes a new instance wrapper around the given `reader`
-        pub fn init(reader: ReaderType) Self {
-            return Self{ .reader = reader, .index = 0, .buffer = undefined };
+        pub fn init(reader: ReaderType, allocator: *std.mem.Allocator) Self {
+            return Self{ .reader = reader, .allocator = allocator };
         }
 
         /// Deserializes the msgpack stream into a value of type `T`
@@ -229,16 +228,11 @@ pub fn Deserializer(comptime ReaderType: type, comptime size: usize) type {
             };
 
             if (comptime trait.isSlice(T)) {
-                const t_buf = std.mem.bytesAsSlice(
-                    meta.Child(T),
-                    self.buffer[self.index..][0 .. len * @sizeOf(meta.Child(T))],
-                );
-                self.index += len * @sizeOf(meta.Child(T));
-                for (t_buf) |*v, i| {
+                var t_buf = try self.allocator.alloc(meta.Child(T), len);
+                for (t_buf) |*v| {
                     try self.deserializeInto(v);
-                    if (i == len - 1) break;
                 }
-                return @alignCast(@alignOf([]meta.Child(T)), t_buf);
+                return t_buf;
             } else {
                 const array_len = info.Array.len;
                 var t_buf: [array_len]info.Array.child = undefined;
@@ -258,11 +252,9 @@ pub fn Deserializer(comptime ReaderType: type, comptime size: usize) type {
                 format(.str_32) => try self.reader.readIntBig(u32),
                 else => return error.MismatchingFormatType,
             };
-            if (len > size - self.index) return error.BufferTooSmall;
-
-            const old = self.index;
-            self.index += try self.reader.readAll(self.buffer[self.index .. self.index + len]);
-            return self.buffer[old..self.index];
+            var buffer = try self.allocator.alloc(u8, len);
+            _ = try self.reader.readAll(buffer);
+            return buffer;
         }
 
         /// Deserializes a msgpack binary data format serialized stream into a slice of bytes
@@ -397,9 +389,9 @@ pub fn Deserializer(comptime ReaderType: type, comptime size: usize) type {
             };
 
             data_type.* = try reader.readIntBig(i8);
-            const old = self.index;
-            self.index += try reader.readAll(self.buffer[old .. old + len]);
-            return self.buffer[old..self.index];
+            var buffer = try self.allocator.alloc(u8, len);
+            _ = try reader.readAll(buffer);
+            return buffer;
         }
 
         /// Resets the internal buffer of `Self`. Calling any of the deserializing functions
@@ -411,8 +403,8 @@ pub fn Deserializer(comptime ReaderType: type, comptime size: usize) type {
 }
 
 /// returns a new `Deserializer` for the type of the given `reader`
-pub fn deserializer(reader: anytype, comptime size: usize) Deserializer(@TypeOf(reader), size) {
-    return Deserializer(@TypeOf(reader), size).init(reader);
+pub fn deserializer(reader: anytype, alloc: *std.mem.Allocator) Deserializer(@TypeOf(reader)) {
+    return Deserializer(@TypeOf(reader)).init(reader, alloc);
 }
 
 /// Generic function that wraps around the given `WriterType`.
