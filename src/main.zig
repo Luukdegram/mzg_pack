@@ -134,7 +134,7 @@ pub fn Deserializer(comptime ReaderType: type, comptime size: usize) type {
                     .Struct => try self.deserializeStruct(C),
                     .Bool => try self.deserializeBool(),
                     .Int => try self.deserializeInt(C),
-                    .Float => try self.deserializeFloat(),
+                    .Float => try self.deserializeFloat(C),
                     .Array => try self.deserializeArray(C),
                     .Pointer => try self.deserializePointer(C),
                     .Null => try self.deserializeNull(),
@@ -369,11 +369,11 @@ pub fn Deserializer(comptime ReaderType: type, comptime size: usize) type {
             switch (float) {
                 format(.float_32) => {
                     if (T != f32) return error.MismatchingFormatType;
-                    return @intToFloat(T, self.reader.readIntBig(u32));
+                    return @bitCast(T, try self.reader.readIntBig(u32));
                 },
                 format(.float_64) => {
                     if (T != f64) return error.MismatchingFormatType;
-                    return @intToFloat(T, self.reader.readIntBig(u64));
+                    return @bitCast(T, try self.reader.readIntBig(u64));
                 },
                 else => return error.MismatchingFormatType,
             }
@@ -426,7 +426,7 @@ pub fn Serializer(comptime WriterType: type) type {
 
         writer: WriterType,
 
-        pub const WriteError = error{ SliceTooLong, integerTooBig } || WriterType.Error;
+        pub const WriteError = error{ SliceTooLong, integerTooBig, InvalidFloatSize } || WriterType.Error;
 
         /// Initializes a new instance of `Serializer(WriterType)`
         pub fn init(writer: WriterType) Self {
@@ -584,12 +584,19 @@ pub fn Serializer(comptime WriterType: type) type {
         /// TODO ensure big-endian byte order
         pub fn serializeFloat(self: *Self, comptime S: type, value: S) WriteError!void {
             comptime assert(trait.isFloat(S));
-            try self.writer.writeByte(if (@typeInfo(S).Float.bits == 32)
-                format(.float_32)
-            else
-                format(.float_64));
-
-            try self.writer.writeAll(std.mem.asBytes(&value));
+            switch (@typeInfo(S).Float.bits) {
+                32 => {
+                    try self.writer.writeByte(format(.float_32));
+                    try self.writer.writeIntBig(u32, @bitCast(u32, value));
+                },
+                64 => {
+                    try self.writer.writeByte(format(.float_64));
+                    try self.writer.writeIntBig(u64, @bitCast(u64, value));
+                },
+                else => {
+                    return error.InvalidFloatSize;
+                },
+            }
         }
 
         /// Serializes and writes a raw byte slice to the given `writer`

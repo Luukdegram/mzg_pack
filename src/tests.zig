@@ -36,6 +36,11 @@ test "serialization" {
             .value = -12389567,
             .expected = "\xd2\xff\x42\xf3\x41",
         },
+        .{ 
+            .type = f64, 
+            .value = 1.25, 
+            .expected = "\xcb\x3f\xf4\x00\x00\x00\x00\x00\x00",
+        },
     };
 
     inline for (test_cases) |case| {
@@ -74,6 +79,18 @@ test "deserialization" {
             .type = [5]u32,
             .value = .{ 0, 2, 3, 5, 6 },
         },
+        .{
+            .type = f32,
+            .value = 1.25,
+        },
+        .{
+            .type = f64,
+            .value = 1.5,
+        },
+        .{
+            .type = []const f64,
+            .value = &[_]f64{ -100.455, 2.0, 3.1415 },
+        },
     };
 
     inline for (test_cases) |case| {
@@ -91,6 +108,7 @@ test "deserialization" {
         switch (case.type) {
             []const u8 => try testing.expectEqualStrings(case.value, result),
             []u8 => try testing.expectEqualSlices(u8, case.value, result),
+            []const f64 => try testing.expectEqualSlices(f64, case.value, result),
             else => switch (@typeInfo(case.type)) {
                 .Pointer => |info| switch (info.size) {
                     .Slice => for (case.value) |val, j| {
