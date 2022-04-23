@@ -92,18 +92,17 @@ pub const Timestamp = struct { sec: u32, nsec: i64 };
 pub fn Deserializer(comptime ReaderType: type) type {
     return struct {
         reader: ReaderType,
-        allocator: *std.mem.Allocator,
+        allocator: std.mem.Allocator,
 
         const Self = @This();
 
         pub const ReadError = error{
             MismatchingFormatType,
             EndOfStream,
-            BufferTooSmall,
         } || ReaderType.Error || std.mem.Allocator.Error;
 
         /// Initializes a new instance wrapper around the given `reader`
-        pub fn init(reader: ReaderType, allocator: *std.mem.Allocator) Self {
+        pub fn init(reader: ReaderType, allocator: std.mem.Allocator) Self {
             return Self{ .reader = reader, .allocator = allocator };
         }
 
@@ -242,7 +241,7 @@ pub fn Deserializer(comptime ReaderType: type) type {
         }
 
         /// Deserializes a msgpack string into a string
-        pub fn deserializeString(self: *Self) ReadError![]const u8 {
+        pub fn deserializeString(self: *Self) ReadError![]u8 {
             const string_byte = try self.reader.readByte();
 
             const len: u32 = switch (string_byte) {
@@ -252,8 +251,12 @@ pub fn Deserializer(comptime ReaderType: type) type {
                 format(.str_32) => try self.reader.readIntBig(u32),
                 else => return error.MismatchingFormatType,
             };
+
             var buffer = try self.allocator.alloc(u8, len);
-            _ = try self.reader.readAll(buffer);
+            var len_read = try self.reader.readAll(buffer);
+
+            if (len_read < len) return error.EndOfStream;
+
             return buffer;
         }
 
@@ -267,11 +270,13 @@ pub fn Deserializer(comptime ReaderType: type) type {
                 format(.bin_32) => try self.reader.readIntBig(u32),
                 else => return error.MismatchingFormatType,
             };
-            if (len > size - self.index) return error.BufferTooSmall;
 
-            const old = self.index;
-            self.index += try self.reader.readAll(self.buffer[self.index .. self.index + len]);
-            return self.buffer[old..self.index];
+            var buffer = try self.allocator.alloc(u8, len);
+            var len_read = try self.reader.readAll(buffer);
+
+            if (len_read < len) return error.EndOfStream;
+
+            return buffer;
         }
 
         /// Deserializes the msgpack data into a boolean.
@@ -403,7 +408,7 @@ pub fn Deserializer(comptime ReaderType: type) type {
 }
 
 /// returns a new `Deserializer` for the type of the given `reader`
-pub fn deserializer(reader: anytype, alloc: *std.mem.Allocator) Deserializer(@TypeOf(reader)) {
+pub fn deserializer(reader: anytype, alloc: std.mem.Allocator) Deserializer(@TypeOf(reader)) {
     return Deserializer(@TypeOf(reader)).init(reader, alloc);
 }
 
@@ -517,7 +522,7 @@ pub fn Serializer(comptime WriterType: type) type {
         /// Serializes an unsigned integer
         pub fn serializeUnsignedInt(self: *Self, comptime S: type, value: S) WriteError!void {
             if (comptime !trait.isUnsignedInt(S))
-                compileError("Expected unsigned integer, but instead found type '" ++ @typeName(S) ++ "'");
+                @compileError("Expected unsigned integer, but instead found type '" ++ @typeName(S) ++ "'");
             switch (comptime meta.bitCount(S)) {
                 0...7 => try self.writer.writeByte(value),
                 8 => {
@@ -543,7 +548,7 @@ pub fn Serializer(comptime WriterType: type) type {
         /// Serializes and checks a signed integer
         pub fn serializeSignedInt(self: *Self, comptime S: type, value: S) WriteError!void {
             if (comptime !trait.isSignedInt(S))
-                compileError("Expected signed integer, but instead found type '" ++ @typeName(S) ++ "'");
+                @compileError("Expected signed integer, but instead found type '" ++ @typeName(S) ++ "'");
 
             switch (comptime meta.bitCount(S)) {
                 0...5 => try self.writer.writeByte(negint(value)),
@@ -667,11 +672,11 @@ pub fn Serializer(comptime WriterType: type) type {
                 0...max(u4) => try writer.writeByte(fixmap(@intCast(u4, fields_len))),
                 max(u4) + 1...max(u16) => {
                     try writer.writeByte(format(.map_16));
-                    try writer.writeIntBig(u16, @intCast(u16, len));
+                    try writer.writeIntBig(u16, @intCast(u16, fields_len));
                 },
                 max(u16) + 1...max(u32) => {
                     try writer.writeByte(format(.array_32));
-                    try writer.writeIntBig(u32, @intCast(u32, len));
+                    try writer.writeIntBig(u32, @intCast(u32, fields_len));
                 },
             }
             inline for (fields) |field| {

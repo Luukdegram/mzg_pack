@@ -2,7 +2,9 @@ const std = @import("std");
 const testing = std.testing;
 const meta = std.meta;
 
-usingnamespace @import("main.zig");
+pub const serializer = @import("./main.zig").serializer;
+pub const deserializer = @import("./main.zig").deserializer;
+pub const Timestamp = @import("./main.zig").Timestamp;
 
 test "serialization" {
     const test_cases = .{
@@ -36,9 +38,9 @@ test "serialization" {
             .value = -12389567,
             .expected = "\xd2\xff\x42\xf3\x41",
         },
-        .{ 
-            .type = f64, 
-            .value = 1.25, 
+        .{
+            .type = f64,
+            .value = 1.25,
             .expected = "\xcb\x3f\xf4\x00\x00\x00\x00\x00\x00",
         },
     };
@@ -112,7 +114,7 @@ test "deserialization" {
 
         var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
         defer arena.deinit();
-        var _deserializer = deserializer(in.reader(), &arena.allocator);
+        var _deserializer = deserializer(in.reader(), arena.allocator());
 
         const result = try _deserializer.deserialize(case.type);
 
@@ -149,7 +151,7 @@ test "(de)serialize timestamp" {
     var in = std.io.fixedBufferStream(&buffer);
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    var _deserializer = deserializer(in.reader(), &arena.allocator);
+    var _deserializer = deserializer(in.reader(), arena.allocator());
 
     const timestamp = Timestamp{ .sec = 50, .nsec = 200 };
     try _serializer.serializeTimestamp(timestamp);
@@ -167,7 +169,7 @@ test "(de)serialize ext format" {
     var in = std.io.fixedBufferStream(&buffer);
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    var _deserializer = deserializer(in.reader(), &arena.allocator);
+    var _deserializer = deserializer(in.reader(), arena.allocator());
 
     try _serializer.serializeExt(2, "Hello world!");
 
@@ -205,7 +207,7 @@ test "(de)serialize with custom declaration" {
     var in = std.io.fixedBufferStream(&buffer);
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    var _deserializer = deserializer(in.reader(), &arena.allocator);
+    var _deserializer = deserializer(in.reader(), arena.allocator());
 
     var decl = Decl{ .x = 10, .y = 50 };
     try _serializer.serialize(decl);
