@@ -253,9 +253,9 @@ pub fn Deserializer(comptime ReaderType: type) type {
             };
 
             var buffer = try self.allocator.alloc(u8, len);
-            var len_read = try self.reader.readAll(buffer);
+            var actual_len = try self.reader.readAll(buffer);
 
-            if (len_read < len) return error.EndOfStream;
+            if (actual_len < len) return error.EndOfStream;
 
             return buffer;
         }
@@ -272,9 +272,9 @@ pub fn Deserializer(comptime ReaderType: type) type {
             };
 
             var buffer = try self.allocator.alloc(u8, len);
-            var len_read = try self.reader.readAll(buffer);
+            var actual_len = try self.reader.readAll(buffer);
 
-            if (len_read < len) return error.EndOfStream;
+            if (actual_len < len) return error.EndOfStream;
 
             return buffer;
         }
@@ -395,7 +395,10 @@ pub fn Deserializer(comptime ReaderType: type) type {
 
             data_type.* = try reader.readIntBig(i8);
             var buffer = try self.allocator.alloc(u8, len);
-            _ = try reader.readAll(buffer);
+            var actual_len = try reader.readAll(buffer);
+
+            if (actual_len < len) return error.EndOfStream;
+
             return buffer;
         }
 
