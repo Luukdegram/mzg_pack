@@ -161,6 +161,26 @@ test "(de)serialize timestamp" {
     try testing.expectEqual(timestamp, result);
 }
 
+test "(de)serialize bin" {
+    var input = [_]u8{ 0x01, 0x02, 0x08, 0x09 };
+
+    var buffer: [4096]u8 = undefined;
+    var out = std.io.fixedBufferStream(&buffer);
+    var _serializer = serializer(out.writer());
+
+    try _serializer.serialize(@as([]u8, &input));
+
+    var in = std.io.fixedBufferStream(&buffer);
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var _deserializer = deserializer(in.reader(), arena.allocator());
+
+    const result = try _deserializer.deserialize([]u8);
+
+    try expectEqualDeep([]u8, &input, result);
+}
+
 test "(de)serialize ext format" {
     var buffer: [4096]u8 = undefined;
     var out = std.io.fixedBufferStream(&buffer);

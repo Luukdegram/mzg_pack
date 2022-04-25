@@ -252,8 +252,8 @@ pub fn Deserializer(comptime ReaderType: type) type {
                 else => return error.MismatchingFormatType,
             };
 
-            var buffer = try self.allocator.alloc(u8, len);
-            var actual_len = try self.reader.readAll(buffer);
+            const buffer = try self.allocator.alloc(u8, len);
+            const actual_len = try self.reader.readAll(buffer);
 
             if (actual_len < len) return error.EndOfStream;
 
@@ -271,8 +271,8 @@ pub fn Deserializer(comptime ReaderType: type) type {
                 else => return error.MismatchingFormatType,
             };
 
-            var buffer = try self.allocator.alloc(u8, len);
-            var actual_len = try self.reader.readAll(buffer);
+            const buffer = try self.allocator.alloc(u8, len);
+            const actual_len = try self.reader.readAll(buffer);
 
             if (actual_len < len) return error.EndOfStream;
 
@@ -394,8 +394,8 @@ pub fn Deserializer(comptime ReaderType: type) type {
             };
 
             data_type.* = try reader.readIntBig(i8);
-            var buffer = try self.allocator.alloc(u8, len);
-            var actual_len = try reader.readAll(buffer);
+            const buffer = try self.allocator.alloc(u8, len);
+            const actual_len = try reader.readAll(buffer);
 
             if (actual_len < len) return error.EndOfStream;
 
@@ -607,8 +607,7 @@ pub fn Serializer(comptime WriterType: type) type {
             const writer = self.writer;
 
             switch (len) {
-                0...max(u8) => try writer.writeByte(@intCast(u8, len)),
-                max(u8) + 1...max(u8) => {
+                0...max(u8) => {
                     try writer.writeByte(format(.bin_8));
                     try writer.writeByte(@intCast(u8, len));
                 },
