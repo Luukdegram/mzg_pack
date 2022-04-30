@@ -144,7 +144,12 @@ pub fn Deserializer(comptime ReaderType: type) type {
         /// Deserializes a pointer to one or multiple items
         pub fn deserializePointer(self: *Self, comptime T: type) ReadError!T {
             return switch (@typeInfo(T).Pointer.size) {
-                .One => try self.deserialize(T),
+                .One => {
+                    var ptr = self.allocator.create(T);
+                    errdefer self.allocator.destroy(ptr);
+                    try self.deserializeInto(ptr);
+                    return ptr;
+                },
                 .Slice => try self.deserializeArray(T),
                 .Many => try self.deserializeArray(T),
                 .C => @compileError("Unsupported pointer type C"),
@@ -197,13 +202,34 @@ pub fn Deserializer(comptime ReaderType: type) type {
                 else => return error.MismatchingFormatType,
             };
             var value: T = undefined;
+            // A static array of bits (0 or 1) with the same len as the number of fields on the struct.
+            // If the value of array[i] is 1, it means that array has been set and should be freed in case
+            // of an error or in case the map has duplicate keys
+            var fields_set = [_]u1{0} ** meta.fields(T).len;
+            // In case of an early abort of this method, free any fields that had already been set
+            errdefer {
+                inline for (meta.fields(T)) |struct_field, field_i| {
+                    if (fields_set[field_i] == 1) {
+                        self.freePartial(&@field(value, struct_field.name));
+                    }
+                }
+            }
             var i: usize = 0;
             loop: while (i < len) : (i += 1) {
                 const key = try self.deserializeString();
 
-                inline for (meta.fields(T)) |struct_field| {
+                inline for (meta.fields(T)) |struct_field, field_i| {
                     if (std.mem.eql(u8, struct_field.name, key)) {
+                        // If this field was already set, free it's value before overwritting it
+                        if (fields_set[field_i] == 1) {
+                            // Unset the field first, so that if deserializeInto fails later on, we do not double-free this field
+                            fields_set[field_i] = 0;
+                            self.freePartial(&@field(value, struct_field.name));
+                        }
+
                         try self.deserializeInto(&@field(value, struct_field.name));
+
+                        fields_set[field_i] = 1;
                         continue :loop;
                     }
                 }
@@ -228,14 +254,30 @@ pub fn Deserializer(comptime ReaderType: type) type {
 
             if (comptime trait.isSlice(T)) {
                 var t_buf = try self.allocator.alloc(meta.Child(T), len);
-                for (t_buf) |*v| {
+                errdefer self.allocator.free(t_buf);
+
+                for (t_buf) |*v, i| {
+                    // If anything goes wrong from here on out, we need to cleanup our memory
+                    errdefer {
+                        var j: usize = 0;
+                        while (j < i) : (j += 1) self.freePartial(&t_buf[j]);
+                    }
+
                     try self.deserializeInto(v);
                 }
                 return t_buf;
             } else {
                 const array_len = info.Array.len;
                 var t_buf: [array_len]info.Array.child = undefined;
-                for (t_buf) |*v| try self.deserializeInto(v);
+                for (t_buf) |*v, i| {
+                    // If anything goes wrong from here on out, we need to cleanup our memory
+                    errdefer {
+                        var j: usize = 0;
+                        while (j < i) : (j += 1) self.freePartial(&t_buf[j]);
+                    }
+
+                    try self.deserializeInto(v);
+                }
                 return t_buf;
             }
         }
@@ -253,6 +295,8 @@ pub fn Deserializer(comptime ReaderType: type) type {
             };
 
             const buffer = try self.allocator.alloc(u8, len);
+            errdefer self.allocator.free(buffer);
+
             const actual_len = try self.reader.readAll(buffer);
 
             if (actual_len < len) return error.EndOfStream;
@@ -272,6 +316,8 @@ pub fn Deserializer(comptime ReaderType: type) type {
             };
 
             const buffer = try self.allocator.alloc(u8, len);
+            errdefer self.allocator.free(buffer);
+
             const actual_len = try self.reader.readAll(buffer);
 
             if (actual_len < len) return error.EndOfStream;
@@ -393,19 +439,67 @@ pub fn Deserializer(comptime ReaderType: type) type {
                 else => return error.MismatchingFormatType,
             };
 
-            data_type.* = try reader.readIntBig(i8);
+            var _data_type = try reader.readIntBig(i8);
+
             const buffer = try self.allocator.alloc(u8, len);
+            errdefer self.allocator.free(buffer);
+
             const actual_len = try reader.readAll(buffer);
 
             if (actual_len < len) return error.EndOfStream;
 
+            // Do not replace the value of input variable `data_type` unless we
+            // are certain this function call will not fail
+            data_type.* = _data_type;
+
             return buffer;
         }
 
-        /// Resets the internal buffer of `Self`. Calling any of the deserializing functions
-        /// after this will rewrite the buffer starting at index 0.
-        pub fn reset(self: *Self) void {
-            self.index = 0;
+        /// Recursively frees any value that was returned by a `deserialize` function (or any of it's specific variants)
+        fn freePartial(self: *Self, ptr: anytype) void {
+            const T = @TypeOf(ptr);
+            comptime assert(trait.is(.Pointer)(T));
+
+            const C = comptime meta.Child(T);
+
+            if (comptime trait.hasFn("deinit")(C)) return C.deinit(ptr, self);
+
+            switch (C) {
+                []const u8, []u8 => {
+                    self.allocator.free(ptr.*);
+                },
+                else => switch (@typeInfo(C)) {
+                    .Struct => {
+                        inline for (meta.fields(T)) |struct_field| {
+                            self.freePartial(&@field(ptr, struct_field.name));
+                        }
+                    },
+                    .Array => {
+                        for (ptr.*) |*v| {
+                            self.freePartial(v);
+                            // Since this is a static array, we do not need to free
+                            // the array itself, only it's individual elements
+                        }
+                    },
+                    .Pointer => {
+                        return switch (@typeInfo(C).Pointer.size) {
+                            .One => {
+                                self.freePartial(ptr.*);
+                                self.allocator.destroy(ptr.*);
+                            },
+                            .Slice, .Many => {
+                                for (ptr.*) |*v| {
+                                    self.freePartial(v);
+                                }
+                                self.allocator.free(ptr.*);
+                            },
+                            .C => @compileError("Unsupported pointer type C"),
+                        };
+                    },
+                    // For everything else, do nothing
+                    else => {},
+                },
+            }
         }
     };
 }
