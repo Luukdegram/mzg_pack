@@ -220,8 +220,8 @@ pub fn Deserializer(comptime ReaderType: type) type {
             };
             var value: T = undefined;
             // A static array of bits (0 or 1) with the same len as the number of fields on the struct.
-            // If the value of array[i] is 1, it means that array has been set and should be freed in case
-            // of an error or in case the map has duplicate keys
+            // If the value of array[i] is 1, it means that field at position i has been set and should be
+            // freed in case of an error or in case the map has duplicate keys
             var fields_set = [_]u1{0} ** meta.fields(T).len;
             // In case of an early abort of this method, free any fields that had already been set
             errdefer {
