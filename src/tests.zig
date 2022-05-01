@@ -235,3 +235,83 @@ test "(de)serialize with custom declaration" {
     const result = try _deserializer.deserialize(Decl);
     try testing.expectEqual(decl, result);
 }
+
+test "deserialize no memory leaks" {
+    const TestSubStruct = struct {
+        str_1: []const u8,
+        float: f64,
+        str_2: []const u8,
+    };
+
+    const TestStruct = struct {
+        str: []const u8,
+        array: []*TestSubStruct,
+    };
+
+    // Prepare the input values
+    var input_1 = TestSubStruct{
+        .str_1 = "ab",
+        .float = 42,
+        .str_2 = "cd",
+    };
+
+    var input_2 = TestSubStruct{
+        .str_1 = "ef",
+        .float = 100,
+        .str_2 = "gh",
+    };
+
+    var input_array = [_]*TestSubStruct{ &input_1, &input_2 };
+
+    var input = TestStruct{
+        .str = "foobar",
+        .array = &input_array,
+    };
+
+    // Create the allocator
+    var allocator = std.testing.allocator;
+
+    // Create the buffer to hold the serialized values
+    var buffer: [4096]u8 = undefined;
+    var out = std.io.fixedBufferStream(&buffer);
+
+    // Create a serializer and serialize the input into the buffer
+    var _serializer = serializer(out.writer());
+    try _serializer.serialize(input);
+
+    // Check how much of the buffer was used by the serialization
+    const max_size = out.pos;
+
+    // Test every possible IO failure scenario and make sure no memory leaks at the end
+    var i: usize = 0;
+    while (i < max_size) : (i += 1) {
+        // Create a reader that reads from [0..i] bytes from the buffer and stops
+        var in = std.io.fixedBufferStream(buffer[0..i]);
+
+        // Create the deserializer
+        var _deserializer = deserializer(in.reader(), allocator);
+
+        _ = _deserializer.deserialize(TestStruct) catch continue;
+
+        // Deserialize should always fail here, so if it didn't then the test itself should fail
+        try testing.expect(false);
+    }
+
+    // Create a reader that reads max_size bytes from the buffer and stops
+    var in = std.io.fixedBufferStream(buffer[0..max_size]);
+
+    // Create the deserializer
+    var _deserializer = deserializer(in.reader(), allocator);
+    var output = try _deserializer.deserialize(TestStruct);
+    defer _deserializer.free(&output);
+
+    // Validate the contents of the
+    try testing.expectEqualStrings(input.str, output.str);
+    try testing.expectEqual(input.array.len, output.array.len);
+    try testing.expectEqualStrings(input.array[0].str_1, output.array[0].str_1);
+    try testing.expectEqual(input.array[0].float, output.array[0].float);
+    try testing.expectEqualStrings(input.array[0].str_2, output.array[0].str_2);
+    try testing.expectEqualStrings(input.array[1].str_1, output.array[1].str_1);
+    try testing.expectEqual(input.array[1].float, output.array[1].float);
+    try testing.expectEqualStrings(input.array[1].str_2, output.array[1].str_2);
+}

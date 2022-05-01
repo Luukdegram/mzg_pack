@@ -80,6 +80,15 @@ fn fromByte(byte: u8) Format {
     return @intToEnum(Format, byte);
 }
 
+/// Returns the maximum len of all fields of this type T
+fn maxFieldsLen(comptime T: type) usize {
+    var len: usize = 0;
+    inline for (meta.fields(T)) |struct_field| {
+        len = std.math.max(struct_field.name.len, len);
+    }
+    return len;
+}
+
 /// Represents a timestamp that can be (de)serialized
 pub const Timestamp = struct { sec: u32, nsec: i64 };
 
@@ -96,10 +105,15 @@ pub fn Deserializer(comptime ReaderType: type) type {
 
         const Self = @This();
 
-        pub const ReadError = error{
+        const ReadErrorBase = error{
             MismatchingFormatType,
             EndOfStream,
-        } || ReaderType.Error || std.mem.Allocator.Error;
+        } || ReaderType.Error;
+
+        pub const ReadError = ReadErrorBase || std.mem.Allocator.Error;
+
+        /// Error set for methods reading data into pre-allocated buffers
+        pub const ReadErrorBuffer = ReadErrorBase || error{BufferOverflow};
 
         /// Initializes a new instance wrapper around the given `reader`
         pub fn init(reader: ReaderType, allocator: std.mem.Allocator) Self {
@@ -128,6 +142,7 @@ pub fn Deserializer(comptime ReaderType: type) type {
             ptr.* = switch (C) {
                 []const u8 => try self.deserializeString(),
                 []u8 => try self.deserializeBin(),
+                Timestamp => try self.deserializeTimestamp(),
                 else => switch (@typeInfo(C)) {
                     .Struct => try self.deserializeStruct(C),
                     .Bool => try self.deserializeBool(),
@@ -144,9 +159,16 @@ pub fn Deserializer(comptime ReaderType: type) type {
         /// Deserializes a pointer to one or multiple items
         pub fn deserializePointer(self: *Self, comptime T: type) ReadError!T {
             return switch (@typeInfo(T).Pointer.size) {
-                .One => try self.deserialize(T),
+                .One => {
+                    const C = @typeInfo(T).Pointer.child;
+
+                    var ptr: T = try self.allocator.create(C);
+                    errdefer self.allocator.destroy(ptr);
+                    try self.deserializeInto(ptr);
+                    return ptr;
+                },
                 .Slice => try self.deserializeArray(T),
-                .Many => try self.deserializeArray(T),
+                .Many => @compileError("Unsupported pointer type Many"),
                 .C => @compileError("Unsupported pointer type C"),
             };
         }
@@ -197,13 +219,43 @@ pub fn Deserializer(comptime ReaderType: type) type {
                 else => return error.MismatchingFormatType,
             };
             var value: T = undefined;
+            // A static array of bits (0 or 1) with the same len as the number of fields on the struct.
+            // If the value of array[i] is 1, it means that field at position i has been set and should be
+            // freed in case of an error or in case the map has duplicate keys
+            var fields_set = [_]bool{false} ** meta.fields(T).len;
+            // In case of an early abort of this method, free any fields that had already been set
+            errdefer {
+                inline for (meta.fields(T)) |struct_field, field_i| {
+                    if (fields_set[field_i]) {
+                        self.free(&@field(value, struct_field.name));
+                    }
+                }
+            }
             var i: usize = 0;
+            // Reusable buffer with the size of the biggest key in this struct
+            var field_key = [_]u8{0} ** (maxFieldsLen(T) + 100);
             loop: while (i < len) : (i += 1) {
-                const key = try self.deserializeString();
+                // No need to free this key, since it's just a slice of our stack allocated `field_key` buffer
+                const key = try self.deserializeStringIntoBuffer(&field_key) catch |err| switch (err) {
+                    // If the key we were reading was of greater len than any of this struct's fields,
+                    // then it could never be equal to any of this struct's fields
+                    error.BufferOverflow => error.MismatchingFormatType,
+                    // All other errors are propagated as they are
+                    else => |base_err| base_err,
+                };
 
-                inline for (meta.fields(T)) |struct_field| {
+                inline for (meta.fields(T)) |struct_field, field_i| {
                     if (std.mem.eql(u8, struct_field.name, key)) {
+                        // If this field was already set, free it's value before overwritting it
+                        if (fields_set[field_i]) {
+                            // Unset the field first, so that if deserializeInto fails later on, we do not need to double-free this field
+                            fields_set[field_i] = false;
+                            self.free(&@field(value, struct_field.name));
+                        }
+
                         try self.deserializeInto(&@field(value, struct_field.name));
+
+                        fields_set[field_i] = true;
                         continue :loop;
                     }
                 }
@@ -228,20 +280,64 @@ pub fn Deserializer(comptime ReaderType: type) type {
 
             if (comptime trait.isSlice(T)) {
                 var t_buf = try self.allocator.alloc(meta.Child(T), len);
-                for (t_buf) |*v| {
+                errdefer self.allocator.free(t_buf);
+
+                for (t_buf) |*v, i| {
+                    // If anything goes wrong from here on out, we need to cleanup our memory
+                    errdefer {
+                        var j: usize = 0;
+                        while (j < i) : (j += 1) self.free(&t_buf[j]);
+                    }
+
                     try self.deserializeInto(v);
                 }
                 return t_buf;
             } else {
                 const array_len = info.Array.len;
                 var t_buf: [array_len]info.Array.child = undefined;
-                for (t_buf) |*v| try self.deserializeInto(v);
+                for (t_buf) |*v, i| {
+                    // If anything goes wrong from here on out, we need to cleanup our memory
+                    errdefer {
+                        var j: usize = 0;
+                        while (j < i) : (j += 1) self.free(&t_buf[j]);
+                    }
+
+                    try self.deserializeInto(v);
+                }
                 return t_buf;
             }
         }
 
         /// Deserializes a msgpack string into a string
         pub fn deserializeString(self: *Self) ReadError![]u8 {
+            var len = try self.deserializeStringLen();
+
+            const buffer = try self.allocator.alloc(u8, len);
+            errdefer self.allocator.free(buffer);
+
+            const actual_len = try self.reader.readAll(buffer);
+
+            if (actual_len < len) return error.EndOfStream;
+
+            return buffer;
+        }
+
+        /// Deserializes a msgpack string into a string
+        pub fn deserializeStringIntoBuffer(self: *Self, buffer: []u8) ReadErrorBuffer![]u8 {
+            var len = try self.deserializeStringLen();
+
+            // If the serialized stream requires a bigger buffer than what we were given
+            if (len > buffer.len) return error.BufferOverflow;
+
+            const actual_len = try self.reader.readAll(buffer[0..len]);
+
+            // If the serialized stream declared a bigger len than what was really available
+            if (actual_len < len) return error.EndOfStream;
+
+            return buffer[0..len];
+        }
+
+        fn deserializeStringLen(self: *Self) ReadErrorBase!u32 {
             const string_byte = try self.reader.readByte();
 
             const len: u32 = switch (string_byte) {
@@ -252,12 +348,7 @@ pub fn Deserializer(comptime ReaderType: type) type {
                 else => return error.MismatchingFormatType,
             };
 
-            const buffer = try self.allocator.alloc(u8, len);
-            const actual_len = try self.reader.readAll(buffer);
-
-            if (actual_len < len) return error.EndOfStream;
-
-            return buffer;
+            return len;
         }
 
         /// Deserializes a msgpack binary data format serialized stream into a slice of bytes
@@ -272,6 +363,8 @@ pub fn Deserializer(comptime ReaderType: type) type {
             };
 
             const buffer = try self.allocator.alloc(u8, len);
+            errdefer self.allocator.free(buffer);
+
             const actual_len = try self.reader.readAll(buffer);
 
             if (actual_len < len) return error.EndOfStream;
@@ -393,19 +486,67 @@ pub fn Deserializer(comptime ReaderType: type) type {
                 else => return error.MismatchingFormatType,
             };
 
-            data_type.* = try reader.readIntBig(i8);
-            const buffer = try self.allocator.alloc(u8, len);
-            const actual_len = try reader.readAll(buffer);
+            var _data_type = try reader.readIntBig(i8);
 
+            const buffer = try self.allocator.alloc(u8, len);
+            errdefer self.allocator.free(buffer);
+
+            const actual_len = try reader.readAll(buffer);
             if (actual_len < len) return error.EndOfStream;
+
+            // Do not replace the value of input variable `data_type` unless we
+            // are certain this function call will not fail
+            data_type.* = _data_type;
 
             return buffer;
         }
 
-        /// Resets the internal buffer of `Self`. Calling any of the deserializing functions
-        /// after this will rewrite the buffer starting at index 0.
-        pub fn reset(self: *Self) void {
-            self.index = 0;
+        /// Recursively frees any value that was returned by a `deserialize` function (or any of it's specific variants)
+        pub fn free(self: *Self, ptr: anytype) void {
+            const T = @TypeOf(ptr);
+            comptime assert(trait.is(.Pointer)(T));
+
+            const C = comptime meta.Child(T);
+
+            if (comptime trait.hasFn("deinit")(C)) return C.deinit(ptr, self);
+
+            switch (C) {
+                []const u8, []u8 => {
+                    self.allocator.free(ptr.*);
+                },
+                else => switch (@typeInfo(C)) {
+                    .Struct => {
+                        inline for (meta.fields(C)) |struct_field| {
+                            self.free(&@field(ptr, struct_field.name));
+                        }
+                    },
+                    .Array => {
+                        for (ptr.*) |*v| {
+                            self.free(v);
+                            // Since this is a static array, we do not need to free
+                            // the array itself, only it's individual elements
+                        }
+                    },
+                    .Pointer => {
+                        return switch (@typeInfo(C).Pointer.size) {
+                            .One => {
+                                self.free(ptr.*);
+                                self.allocator.destroy(ptr.*);
+                            },
+                            .Slice => {
+                                for (ptr.*) |*v| {
+                                    self.free(v);
+                                }
+                                self.allocator.free(ptr.*);
+                            },
+                            .Many => @compileError("Unsupported pointer type Many"),
+                            .C => @compileError("Unsupported pointer type C"),
+                        };
+                    },
+                    // For everything else, do nothing
+                    else => {},
+                },
+            }
         }
     };
 }
@@ -447,6 +588,7 @@ pub fn Serializer(comptime WriterType: type) type {
             switch (S) {
                 []const u8 => try self.serializeString(value),
                 []u8 => try self.serializeBin(value),
+                Timestamp => try self.serializeTimestamp(value),
                 else => switch (@typeInfo(S)) {
                     .Int => try self.serializeInt(S, value),
                     .Bool => try self.serializeBool(value),
@@ -649,9 +791,13 @@ pub fn Serializer(comptime WriterType: type) type {
 
         /// Serializes a pointer and writes its internal value to the `writer`
         pub fn serializePointer(self: *Self, comptime S: type, value: S) WriteError!void {
+            const C = @typeInfo(S).Pointer.child;
+
             switch (@typeInfo(S).Pointer.size) {
-                .One => try self.serializeTyped(S, value),
-                .Many, .C, .Slice => try self.serializeArray(S, value),
+                .One => try self.serializeTyped(C, value.*),
+                .Slice => try self.serializeArray(S, value),
+                .Many => @compileError("Unsupported pointer type Many"),
+                .C => @compileError("Unsupported pointer type C"),
             }
         }
 
