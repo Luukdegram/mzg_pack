@@ -279,9 +279,8 @@ test "deserialize no memory leaks" {
     var _serializer = serializer(out.writer());
     try _serializer.serialize(input);
 
+    // Check how much of the buffer was used by the serialization
     const max_size = out.pos;
-
-    _ = allocator;
 
     // Test every possible IO failure scenario and make sure no memory leaks at the end
     var i: usize = 0;
@@ -306,12 +305,13 @@ test "deserialize no memory leaks" {
     var output = try _deserializer.deserialize(TestStruct);
     defer _deserializer.free(&output);
 
-    try testing.expectEqualStrings("foobar", output.str);
-    try testing.expectEqual(@as(usize, 2), output.array.len);
-    try testing.expectEqualStrings("ab", output.array[0].str_1);
-    try testing.expectEqual(@as(f64, 42), output.array[0].float);
-    try testing.expectEqualStrings("cd", output.array[0].str_2);
-    try testing.expectEqualStrings("ef", output.array[1].str_1);
-    try testing.expectEqual(@as(f64, 100), output.array[1].float);
-    try testing.expectEqualStrings("gh", output.array[1].str_2);
+    // Validate the contents of the
+    try testing.expectEqualStrings(input.str, output.str);
+    try testing.expectEqual(input.array.len, output.array.len);
+    try testing.expectEqualStrings(input.array[0].str_1, output.array[0].str_1);
+    try testing.expectEqual(input.array[0].float, output.array[0].float);
+    try testing.expectEqualStrings(input.array[0].str_2, output.array[0].str_2);
+    try testing.expectEqualStrings(input.array[1].str_1, output.array[1].str_1);
+    try testing.expectEqual(input.array[1].float, output.array[1].float);
+    try testing.expectEqualStrings(input.array[1].str_2, output.array[1].str_2);
 }
