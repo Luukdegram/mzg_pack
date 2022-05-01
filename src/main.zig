@@ -492,7 +492,6 @@ pub fn Deserializer(comptime ReaderType: type) type {
             errdefer self.allocator.free(buffer);
 
             const actual_len = try reader.readAll(buffer);
-
             if (actual_len < len) return error.EndOfStream;
 
             // Do not replace the value of input variable `data_type` unless we
