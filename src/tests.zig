@@ -235,3 +235,66 @@ test "(de)serialize with custom declaration" {
     const result = try _deserializer.deserialize(Decl);
     try testing.expectEqual(decl, result);
 }
+
+test "deserialize no memory leaks" {
+    const TestSubStruct = struct {
+        str_1: []const u8,
+        float: f64,
+        str_2: []const u8,
+    };
+
+    const TestStruct = struct {
+        str: []const u8,
+        array: []*TestSubStruct,
+    };
+
+    // Prepare the input values
+    var input_1 = TestSubStruct{
+        .str_1 = "ab",
+        .float = 42,
+        .str_2 = "cd",
+    };
+
+    var input_2 = TestSubStruct{
+        .str_1 = "ef",
+        .float = 100,
+        .str_2 = "gh",
+    };
+
+    var input_array = [_]*TestSubStruct{ &input_1, &input_2 };
+
+    var input = TestStruct{
+        .str = "foobar",
+        .array = &input_array,
+    };
+
+    // Create the allocator
+    var allocator = std.testing.allocator;
+
+    // Create the buffer to hold the serialized values
+    var buffer: [4096]u8 = undefined;
+    var out = std.io.fixedBufferStream(&buffer);
+
+    // Create a serializer and serialize the input into the buffer
+    var _serializer = serializer(out.writer());
+    try _serializer.serialize(input);
+
+    const max_size = out.pos - 1;
+
+    _ = allocator;
+
+    // Test every possible IO failure scenario and make sure no memory leaks at the end
+    var i: usize = 0;
+    while (i < max_size) : (i += 1) {
+        // Create the deserializer
+        var in = std.io.fixedBufferStream(&buffer);
+        var in_limited = std.io.limitedReader(in.reader(), i);
+
+        var _deserializer = deserializer(in_limited.reader(), allocator);
+
+        _ = _deserializer.deserialize(TestStruct) catch continue;
+
+        // Deserialize should always fail here, so if it didn't then the test itself should fail
+        try testing.expect(false);
+    }
+}

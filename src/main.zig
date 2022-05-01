@@ -145,7 +145,9 @@ pub fn Deserializer(comptime ReaderType: type) type {
         pub fn deserializePointer(self: *Self, comptime T: type) ReadError!T {
             return switch (@typeInfo(T).Pointer.size) {
                 .One => {
-                    var ptr = self.allocator.create(T);
+                    const C = @typeInfo(T).Pointer.child;
+
+                    var ptr: T = try self.allocator.create(C);
                     errdefer self.allocator.destroy(ptr);
                     try self.deserializeInto(ptr);
                     return ptr;
@@ -216,7 +218,9 @@ pub fn Deserializer(comptime ReaderType: type) type {
             }
             var i: usize = 0;
             loop: while (i < len) : (i += 1) {
+                // TODO Study way of using buffer for keys when possible (most often will not be long anyway)
                 const key = try self.deserializeString();
+                defer self.allocator.free(key);
 
                 inline for (meta.fields(T)) |struct_field, field_i| {
                     if (std.mem.eql(u8, struct_field.name, key)) {
@@ -470,7 +474,7 @@ pub fn Deserializer(comptime ReaderType: type) type {
                 },
                 else => switch (@typeInfo(C)) {
                     .Struct => {
-                        inline for (meta.fields(T)) |struct_field| {
+                        inline for (meta.fields(C)) |struct_field| {
                             self.freePartial(&@field(ptr, struct_field.name));
                         }
                     },
@@ -743,8 +747,10 @@ pub fn Serializer(comptime WriterType: type) type {
 
         /// Serializes a pointer and writes its internal value to the `writer`
         pub fn serializePointer(self: *Self, comptime S: type, value: S) WriteError!void {
+            const C = @typeInfo(S).Pointer.child;
+
             switch (@typeInfo(S).Pointer.size) {
-                .One => try self.serializeTyped(S, value),
+                .One => try self.serializeTyped(C, value.*),
                 .Many, .C, .Slice => try self.serializeArray(S, value),
             }
         }
