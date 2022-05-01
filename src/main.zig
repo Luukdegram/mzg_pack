@@ -168,7 +168,7 @@ pub fn Deserializer(comptime ReaderType: type) type {
                     return ptr;
                 },
                 .Slice => try self.deserializeArray(T),
-                .Many => try self.deserializeArray(T),
+                .Many => @compileError("Unsupported pointer type Many"),
                 .C => @compileError("Unsupported pointer type C"),
             };
         }
@@ -533,12 +533,13 @@ pub fn Deserializer(comptime ReaderType: type) type {
                                 self.free(ptr.*);
                                 self.allocator.destroy(ptr.*);
                             },
-                            .Slice, .Many => {
+                            .Slice => {
                                 for (ptr.*) |*v| {
                                     self.free(v);
                                 }
                                 self.allocator.free(ptr.*);
                             },
+                            .Many => @compileError("Unsupported pointer type Many"),
                             .C => @compileError("Unsupported pointer type C"),
                         };
                     },
@@ -794,7 +795,9 @@ pub fn Serializer(comptime WriterType: type) type {
 
             switch (@typeInfo(S).Pointer.size) {
                 .One => try self.serializeTyped(C, value.*),
-                .Many, .C, .Slice => try self.serializeArray(S, value),
+                .Slice => try self.serializeArray(S, value),
+                .Many => @compileError("Unsupported pointer type Many"),
+                .C => @compileError("Unsupported pointer type C"),
             }
         }
 
