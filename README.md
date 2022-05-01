@@ -36,8 +36,11 @@ const MyStruct = struct {
 };
 
 pub fn main() !void {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    const allocator = gpa.allocator();
+
     const serializer = msg_pack.serializer(some_given_writer);
-    const deserializer = msg_pack.deserializer(some_given_reader, 4096); // 4096 is the internal buffer size
+    const deserializer = msg_pack.deserializer(some_given_reader, allocator);
     
     // define our data
     const to_serialize = MyStruct{
@@ -49,6 +52,7 @@ pub fn main() !void {
     try serializer.serialize(to_serialize);
     
     const result = try deserializer.deserialize(MyStruct); // result == to_serialize
+    defer deserializer.free(&result);
 }
 ```
 
@@ -81,12 +85,13 @@ test "(de)serialize with custom declaration" {
     var _serializer = serializer(out.writer());
 
     var in = std.io.fixedBufferStream(&buffer);
-    var _deserializer = deserializer(in.reader(), 4096);
+    var _deserializer = deserializer(in.reader(), std.testing.allocator);
 
     var decl = Decl{ .x = 10, .y = 50 };
     try _serializer.serialize(decl);
 
     const result = try _deserializer.deserialize(Decl);
+    defer _deserializer.free(&result);
     testing.expectEqual(decl, result);
 }
 ```
@@ -201,7 +206,7 @@ pub fn deserializeStruct(self: *Self, comptime T: type) ReadError!T
 pub fn deserializeArray(self: *Self, comptime T: type) ReadError!T
 
 /// Deserializes a msgpack string into a string
-pub fn deserializeString(self: *Self) ReadError![]const u8
+pub fn deserializeString(self: *Self) ReadError![]u8
 
 /// Deserializes a msgpack binary data format serialized stream into a slice of bytes
 pub fn deserializeBin(self: *Self) ReadError![]u8
@@ -226,10 +231,6 @@ pub fn deserializeFloat(self: *Self, comptime T: type) ReadError!T
 /// Deserializes extension data and sets the given `type` value
 pub fn deserializeExt(self: *Self, data_type: *i8) ReadError![]const u8
 
-/// Resets the internal buffer of `Self`. Calling any of the deserializing functions
-/// after this will rewrite the buffer starting at index 0.
-pub fn reset(self: *Self) void
-
 /// returns a new `Deserializer` for the type of the given `reader`
-pub fn deserializer(reader: anytype, comptime size: usize) Deserializer(@TypeOf(reader), size)
+pub fn deserializer(reader: anytype, allocator: Allocator) Deserializer(@TypeOf(reader))
 ```
