@@ -233,7 +233,7 @@ pub fn Deserializer(comptime ReaderType: type) type {
             }
             var i: usize = 0;
             // Reusable buffer with the size of the biggest key in this struct
-            var field_key = [_]u8{0} ** (maxFieldsLen(T) + 100);
+            var field_key = [_]u8{0} ** maxFieldsLen(T);
             loop: while (i < len) : (i += 1) {
                 // No need to free this key, since it's just a slice of our stack allocated `field_key` buffer
                 const key = try self.deserializeStringIntoBuffer(&field_key) catch |err| switch (err) {
