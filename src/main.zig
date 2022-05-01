@@ -222,11 +222,11 @@ pub fn Deserializer(comptime ReaderType: type) type {
             // A static array of bits (0 or 1) with the same len as the number of fields on the struct.
             // If the value of array[i] is 1, it means that field at position i has been set and should be
             // freed in case of an error or in case the map has duplicate keys
-            var fields_set = [_]u1{0} ** meta.fields(T).len;
+            var fields_set = [_]bool{false} ** meta.fields(T).len;
             // In case of an early abort of this method, free any fields that had already been set
             errdefer {
                 inline for (meta.fields(T)) |struct_field, field_i| {
-                    if (fields_set[field_i] == 1) {
+                    if (fields_set[field_i] == true) {
                         self.free(&@field(value, struct_field.name));
                     }
                 }
@@ -247,15 +247,15 @@ pub fn Deserializer(comptime ReaderType: type) type {
                 inline for (meta.fields(T)) |struct_field, field_i| {
                     if (std.mem.eql(u8, struct_field.name, key)) {
                         // If this field was already set, free it's value before overwritting it
-                        if (fields_set[field_i] == 1) {
+                        if (fields_set[field_i] == true) {
                             // Unset the field first, so that if deserializeInto fails later on, we do not need to double-free this field
-                            fields_set[field_i] = 0;
+                            fields_set[field_i] = false;
                             self.free(&@field(value, struct_field.name));
                         }
 
                         try self.deserializeInto(&@field(value, struct_field.name));
 
-                        fields_set[field_i] = 1;
+                        fields_set[field_i] = true;
                         continue :loop;
                     }
                 }
