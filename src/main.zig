@@ -96,10 +96,15 @@ pub fn Deserializer(comptime ReaderType: type) type {
 
         const Self = @This();
 
-        pub const ReadError = error{
+        const ReadErrorBase = error{
             MismatchingFormatType,
             EndOfStream,
-        } || ReaderType.Error || std.mem.Allocator.Error;
+        } || ReaderType.Error;
+
+        pub const ReadError = ReadErrorBase || std.mem.Allocator.Error;
+
+        /// Error set for methods reading data into pre-allocated buffers
+        pub const ReadErrorBuffer = ReadErrorBase || error{BufferOverflow};
 
         /// Initializes a new instance wrapper around the given `reader`
         pub fn init(reader: ReaderType, allocator: std.mem.Allocator) Self {
@@ -212,7 +217,7 @@ pub fn Deserializer(comptime ReaderType: type) type {
             errdefer {
                 inline for (meta.fields(T)) |struct_field, field_i| {
                     if (fields_set[field_i] == 1) {
-                        self.freePartial(&@field(value, struct_field.name));
+                        self.free(&@field(value, struct_field.name));
                     }
                 }
             }
@@ -228,7 +233,7 @@ pub fn Deserializer(comptime ReaderType: type) type {
                         if (fields_set[field_i] == 1) {
                             // Unset the field first, so that if deserializeInto fails later on, we do not double-free this field
                             fields_set[field_i] = 0;
-                            self.freePartial(&@field(value, struct_field.name));
+                            self.free(&@field(value, struct_field.name));
                         }
 
                         try self.deserializeInto(&@field(value, struct_field.name));
@@ -264,7 +269,7 @@ pub fn Deserializer(comptime ReaderType: type) type {
                     // If anything goes wrong from here on out, we need to cleanup our memory
                     errdefer {
                         var j: usize = 0;
-                        while (j < i) : (j += 1) self.freePartial(&t_buf[j]);
+                        while (j < i) : (j += 1) self.free(&t_buf[j]);
                     }
 
                     try self.deserializeInto(v);
@@ -277,7 +282,7 @@ pub fn Deserializer(comptime ReaderType: type) type {
                     // If anything goes wrong from here on out, we need to cleanup our memory
                     errdefer {
                         var j: usize = 0;
-                        while (j < i) : (j += 1) self.freePartial(&t_buf[j]);
+                        while (j < i) : (j += 1) self.free(&t_buf[j]);
                     }
 
                     try self.deserializeInto(v);
@@ -288,6 +293,34 @@ pub fn Deserializer(comptime ReaderType: type) type {
 
         /// Deserializes a msgpack string into a string
         pub fn deserializeString(self: *Self) ReadError![]u8 {
+            var len = try self.deserializeStringLen();
+
+            const buffer = try self.allocator.alloc(u8, len);
+            errdefer self.allocator.free(buffer);
+
+            const actual_len = try self.reader.readAll(buffer);
+
+            if (actual_len < len) return error.EndOfStream;
+
+            return buffer;
+        }
+
+        /// Deserializes a msgpack string into a string
+        pub fn deserializeStringIntoBuffer(self: *Self, buffer: []u8) ReadErrorBuffer![]u8 {
+            var len = try self.deserializeStringLen();
+
+            // If the serialized stream requires a bigger buffer than what we were given
+            if (len > buffer.len) return error.BufferOverflow;
+
+            const actual_len = try self.reader.readAll(buffer);
+
+            // If the serialized stream declared a bigger len than what was really available
+            if (actual_len < len) return error.EndOfStream;
+
+            return buffer[0..len];
+        }
+
+        fn deserializeStringLen(self: *Self) ReadError!u32 {
             const string_byte = try self.reader.readByte();
 
             const len: u32 = switch (string_byte) {
@@ -298,14 +331,7 @@ pub fn Deserializer(comptime ReaderType: type) type {
                 else => return error.MismatchingFormatType,
             };
 
-            const buffer = try self.allocator.alloc(u8, len);
-            errdefer self.allocator.free(buffer);
-
-            const actual_len = try self.reader.readAll(buffer);
-
-            if (actual_len < len) return error.EndOfStream;
-
-            return buffer;
+            return len;
         }
 
         /// Deserializes a msgpack binary data format serialized stream into a slice of bytes
@@ -460,7 +486,7 @@ pub fn Deserializer(comptime ReaderType: type) type {
         }
 
         /// Recursively frees any value that was returned by a `deserialize` function (or any of it's specific variants)
-        fn freePartial(self: *Self, ptr: anytype) void {
+        pub fn free(self: *Self, ptr: anytype) void {
             const T = @TypeOf(ptr);
             comptime assert(trait.is(.Pointer)(T));
 
@@ -475,12 +501,12 @@ pub fn Deserializer(comptime ReaderType: type) type {
                 else => switch (@typeInfo(C)) {
                     .Struct => {
                         inline for (meta.fields(C)) |struct_field| {
-                            self.freePartial(&@field(ptr, struct_field.name));
+                            self.free(&@field(ptr, struct_field.name));
                         }
                     },
                     .Array => {
                         for (ptr.*) |*v| {
-                            self.freePartial(v);
+                            self.free(v);
                             // Since this is a static array, we do not need to free
                             // the array itself, only it's individual elements
                         }
@@ -488,12 +514,12 @@ pub fn Deserializer(comptime ReaderType: type) type {
                     .Pointer => {
                         return switch (@typeInfo(C).Pointer.size) {
                             .One => {
-                                self.freePartial(ptr.*);
+                                self.free(ptr.*);
                                 self.allocator.destroy(ptr.*);
                             },
                             .Slice, .Many => {
                                 for (ptr.*) |*v| {
-                                    self.freePartial(v);
+                                    self.free(v);
                                 }
                                 self.allocator.free(ptr.*);
                             },

@@ -279,22 +279,39 @@ test "deserialize no memory leaks" {
     var _serializer = serializer(out.writer());
     try _serializer.serialize(input);
 
-    const max_size = out.pos - 1;
+    const max_size = out.pos;
 
     _ = allocator;
 
     // Test every possible IO failure scenario and make sure no memory leaks at the end
     var i: usize = 0;
     while (i < max_size) : (i += 1) {
-        // Create the deserializer
-        var in = std.io.fixedBufferStream(&buffer);
-        var in_limited = std.io.limitedReader(in.reader(), i);
+        // Create a reader that reads from [0..i] bytes from the buffer and stops
+        var in = std.io.fixedBufferStream(buffer[0..i]);
 
-        var _deserializer = deserializer(in_limited.reader(), allocator);
+        // Create the deserializer
+        var _deserializer = deserializer(in.reader(), allocator);
 
         _ = _deserializer.deserialize(TestStruct) catch continue;
 
         // Deserialize should always fail here, so if it didn't then the test itself should fail
         try testing.expect(false);
     }
+
+    // Create a reader that reads max_size bytes from the buffer and stops
+    var in = std.io.fixedBufferStream(buffer[0..max_size]);
+
+    // Create the deserializer
+    var _deserializer = deserializer(in.reader(), allocator);
+    var output = try _deserializer.deserialize(TestStruct);
+    defer _deserializer.free(&output);
+
+    try testing.expectEqualStrings("foobar", output.str);
+    try testing.expectEqual(@as(usize, 2), output.array.len);
+    try testing.expectEqualStrings("ab", output.array[0].str_1);
+    try testing.expectEqual(@as(f64, 42), output.array[0].float);
+    try testing.expectEqualStrings("cd", output.array[0].str_2);
+    try testing.expectEqualStrings("ef", output.array[1].str_1);
+    try testing.expectEqual(@as(f64, 100), output.array[1].float);
+    try testing.expectEqualStrings("gh", output.array[1].str_2);
 }
