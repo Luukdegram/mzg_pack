@@ -226,7 +226,7 @@ pub fn Deserializer(comptime ReaderType: type) type {
             // In case of an early abort of this method, free any fields that had already been set
             errdefer {
                 inline for (meta.fields(T)) |struct_field, field_i| {
-                    if (fields_set[field_i] == true) {
+                    if (fields_set[field_i]) {
                         self.free(&@field(value, struct_field.name));
                     }
                 }
@@ -247,7 +247,7 @@ pub fn Deserializer(comptime ReaderType: type) type {
                 inline for (meta.fields(T)) |struct_field, field_i| {
                     if (std.mem.eql(u8, struct_field.name, key)) {
                         // If this field was already set, free it's value before overwritting it
-                        if (fields_set[field_i] == true) {
+                        if (fields_set[field_i]) {
                             // Unset the field first, so that if deserializeInto fails later on, we do not need to double-free this field
                             fields_set[field_i] = false;
                             self.free(&@field(value, struct_field.name));
