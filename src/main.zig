@@ -80,6 +80,15 @@ fn fromByte(byte: u8) Format {
     return @intToEnum(Format, byte);
 }
 
+/// Returns the maximum len of all fields of this type T
+fn maxFieldsLen(comptime T: type) usize {
+    var len: usize = 0;
+    inline for (meta.fields(T)) |struct_field| {
+        len = std.math.max(struct_field.name.len, len);
+    }
+    return len;
+}
+
 /// Represents a timestamp that can be (de)serialized
 pub const Timestamp = struct { sec: u32, nsec: i64 };
 
@@ -133,6 +142,7 @@ pub fn Deserializer(comptime ReaderType: type) type {
             ptr.* = switch (C) {
                 []const u8 => try self.deserializeString(),
                 []u8 => try self.deserializeBin(),
+                Timestamp => try self.deserializeTimestamp(),
                 else => switch (@typeInfo(C)) {
                     .Struct => try self.deserializeStruct(C),
                     .Bool => try self.deserializeBool(),
@@ -222,16 +232,23 @@ pub fn Deserializer(comptime ReaderType: type) type {
                 }
             }
             var i: usize = 0;
+            // Reusable buffer with the size of the biggest key in this struct
+            var field_key = [_]u8{0} ** (maxFieldsLen(T) + 100);
             loop: while (i < len) : (i += 1) {
-                // TODO Study way of using buffer for keys when possible (most often will not be long anyway)
-                const key = try self.deserializeString();
-                defer self.allocator.free(key);
+                // No need to free this key, since it's just a slice of our stack allocated `field_key` buffer
+                const key = try self.deserializeStringIntoBuffer(&field_key) catch |err| switch (err) {
+                    // If the key we were reading was of greater len than any of this struct's fields,
+                    // then it could never be equal to any of this struct's fields
+                    error.BufferOverflow => error.MismatchingFormatType,
+                    // All other errors are propagated as they are
+                    else => |base_err| base_err,
+                };
 
                 inline for (meta.fields(T)) |struct_field, field_i| {
                     if (std.mem.eql(u8, struct_field.name, key)) {
                         // If this field was already set, free it's value before overwritting it
                         if (fields_set[field_i] == 1) {
-                            // Unset the field first, so that if deserializeInto fails later on, we do not double-free this field
+                            // Unset the field first, so that if deserializeInto fails later on, we do not need to double-free this field
                             fields_set[field_i] = 0;
                             self.free(&@field(value, struct_field.name));
                         }
@@ -312,7 +329,7 @@ pub fn Deserializer(comptime ReaderType: type) type {
             // If the serialized stream requires a bigger buffer than what we were given
             if (len > buffer.len) return error.BufferOverflow;
 
-            const actual_len = try self.reader.readAll(buffer);
+            const actual_len = try self.reader.readAll(buffer[0..len]);
 
             // If the serialized stream declared a bigger len than what was really available
             if (actual_len < len) return error.EndOfStream;
@@ -320,7 +337,7 @@ pub fn Deserializer(comptime ReaderType: type) type {
             return buffer[0..len];
         }
 
-        fn deserializeStringLen(self: *Self) ReadError!u32 {
+        fn deserializeStringLen(self: *Self) ReadErrorBase!u32 {
             const string_byte = try self.reader.readByte();
 
             const len: u32 = switch (string_byte) {
@@ -571,6 +588,7 @@ pub fn Serializer(comptime WriterType: type) type {
             switch (S) {
                 []const u8 => try self.serializeString(value),
                 []u8 => try self.serializeBin(value),
+                Timestamp => try self.serializeTimestamp(value),
                 else => switch (@typeInfo(S)) {
                     .Int => try self.serializeInt(S, value),
                     .Bool => try self.serializeBool(value),
