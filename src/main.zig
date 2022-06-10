@@ -392,21 +392,8 @@ pub fn Deserializer(comptime ReaderType: type) type {
             // Read the value as an integer
             var deserialized_int = try self.deserializeInt(I);
 
-            // Validate that the integer that was read is a valid member of the enum
-            var valid: bool = false;
-
-            inline for (meta.fields(T)) |enum_field| {
-                if (enum_field.value == deserialized_int) {
-                    valid = true;
-                    break;
-                }
-            }
-
-            if (!valid) {
-                return error.MismatchingFormatType;
-            }
-
-            return @intToEnum(T, deserialized_int);
+            // Validates that the integer that was read is a valid member of the enum and converts it
+            return std.meta.intToEnum(T, deserialized_int) catch return error.MismatchingFormatType;
         }
 
         /// Deserializes a tagged union
@@ -417,7 +404,7 @@ pub fn Deserializer(comptime ReaderType: type) type {
 
             const TagType = comptime meta.Tag(T);
 
-            var tag = try self.deserializeEnum(TagType);
+            const tag = try self.deserializeEnum(TagType);
 
             // Declare the value as undefined, but assign it right away
             var value: T = undefined;
