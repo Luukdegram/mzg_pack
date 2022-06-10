@@ -74,6 +74,10 @@ test "deserialization" {
             .value = .{ .compact = true, .schema = 5 },
         },
         .{
+            .type = struct { kind: enum { file, folder }, data: union(enum) { file: i32, folder: f64 } },
+            .value = .{ .kind = .file, .data = .{ .folder = 1.2 } },
+        },
+        .{
             .type = []const []const u8,
             .value = &[_][]const u8{ "one", "two", "three" },
         },
@@ -243,9 +247,14 @@ test "deserialize no memory leaks" {
         str_2: []const u8,
     };
 
+    const TestUnion = union(enum) {
+        str: []const u8,
+    };
+
     const TestStruct = struct {
         str: []const u8,
         array: []*TestSubStruct,
+        tagged_union: *TestUnion,
     };
 
     // Prepare the input values
@@ -263,10 +272,11 @@ test "deserialize no memory leaks" {
 
     var input_array = [_]*TestSubStruct{ &input_1, &input_2 };
 
-    var input = TestStruct{
-        .str = "foobar",
-        .array = &input_array,
+    var input_tagged_union = TestUnion{
+        .str = "barfoo",
     };
+
+    var input = TestStruct{ .str = "foobar", .array = &input_array, .tagged_union = &input_tagged_union };
 
     // Create the allocator
     var allocator = std.testing.allocator;
@@ -314,4 +324,6 @@ test "deserialize no memory leaks" {
     try testing.expectEqualStrings(input.array[1].str_1, output.array[1].str_1);
     try testing.expectEqual(input.array[1].float, output.array[1].float);
     try testing.expectEqualStrings(input.array[1].str_2, output.array[1].str_2);
+    try testing.expectEqual(@as(std.meta.Tag(TestUnion), .str), output.tagged_union.*);
+    try testing.expectEqualStrings(input.tagged_union.str, output.tagged_union.str);
 }
