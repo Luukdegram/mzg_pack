@@ -387,9 +387,26 @@ pub fn Deserializer(comptime ReaderType: type) type {
         pub fn deserializeEnum(self: *Self, comptime T: type) ReadError!T {
             if (@typeInfo(T) != .Enum) @compileError("Expected enum type, but found type '" ++ @typeName(T) ++ "'");
 
-            const I = comptime std.meta.Tag(T);
+            const I = comptime meta.Tag(T);
 
-            return @intToEnum(T, try self.deserializeInt(I));
+            // Read the value as an integer
+            var deserialized_int = try self.deserializeInt(I);
+
+            // Validate that the integer that was read is a valid member of the enum
+            var valid: bool = false;
+
+            inline for (meta.fields(T)) |enum_field| {
+                if (enum_field.value == deserialized_int) {
+                    valid = true;
+                    break;
+                }
+            }
+
+            if (!valid) {
+                return error.MismatchingFormatType;
+            }
+
+            return @intToEnum(T, deserialized_int);
         }
 
         /// Deserializes a tagged union
@@ -398,7 +415,7 @@ pub fn Deserializer(comptime ReaderType: type) type {
 
             if (@typeInfo(T).Union.tag_type == null) @compileError("Expected tagged union type, but found type untagged '" ++ @typeName(T) ++ "'");
 
-            const TagType = comptime std.meta.Tag(T);
+            const TagType = comptime meta.Tag(T);
 
             var tag = try self.deserializeEnum(TagType);
 
@@ -406,10 +423,11 @@ pub fn Deserializer(comptime ReaderType: type) type {
             var value: T = undefined;
 
             // Deserialize the payload of the Union
-            inline for (std.meta.fields(T)) |field| {
+            inline for (meta.fields(T)) |field| {
                 // Check what the tag that was just deserialized was
                 if (tag == @field(TagType, field.name)) {
                     value = @unionInit(T, field.name, try self.deserialize(field.field_type));
+                    break;
                 }
             }
 
@@ -559,6 +577,7 @@ pub fn Deserializer(comptime ReaderType: type) type {
                         inline for (meta.fields(C)) |union_field| {
                             if (ptr.* == @field(C, union_field.name)) {
                                 self.free(&@field(ptr.*, union_field.name));
+                                break;
                             }
                         }
                     },
@@ -704,7 +723,7 @@ pub fn Serializer(comptime WriterType: type) type {
         pub fn serializeEnum(self: *Self, comptime S: type, value: S) WriteError!void {
             if (@typeInfo(S) != .Enum) @compileError("Expected enum, but instead found type '" ++ @typeName(S) ++ "'");
 
-            const I = comptime std.meta.Tag(S);
+            const I = comptime meta.Tag(S);
 
             try self.serializeInt(I, @enumToInt(value));
         }
@@ -716,16 +735,17 @@ pub fn Serializer(comptime WriterType: type) type {
             if (@typeInfo(S).Union.tag_type == null) @compileError("Expected tagged union, but instead found untagged '" ++ @typeName(S) ++ "'");
 
             // Type representing the Tag of the Union
-            const TagType = comptime std.meta.Tag(S);
+            const TagType = comptime meta.Tag(S);
 
             // Serialize the tag
             try self.serializeEnum(TagType, @as(TagType, value));
 
             // Serialize the payload of the Union
-            inline for (std.meta.fields(S)) |field| {
+            inline for (meta.fields(S)) |field| {
                 // Check if the Union has this tag
                 if (value == @field(TagType, field.name)) {
                     try self.serialize(@field(value, field.name));
+                    break;
                 }
             }
         }
